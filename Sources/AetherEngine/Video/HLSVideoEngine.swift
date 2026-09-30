@@ -1,3 +1,4 @@
+// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import AVFoundation
 import Foundation
 import AetherLibavformat
@@ -102,6 +103,49 @@ public final class HLSVideoEngine: @unchecked Sendable {
     }
     private var server: HLSLocalServer?
     var provider: VideoSegmentProvider?
+    let nativeLiveDVRPolicy = LiveDVRRetentionPolicy() // shared native retention contract; internal for integration witnesses
+    private let liveRetentionQueue = DispatchQueue(label: "com.aetherengine.live-retention", qos: .utility)
+    private var liveRetentionScheduled = false // restartLock; at most one pending I/O job
+    private var liveRetentionRevision: UInt64 = 0 // restartLock; do not lose an update during I/O
+
+    var nativeLiveDVRWindow: LiveDVRRetentionPolicy.Snapshot? { nativeLiveDVRPolicy.snapshot }
+    var nativeLiveDVRMandatoryBytes: Int { subsystemSnapshot().cache?.nativeLiveMandatoryBytes ?? 0 }
+
+    func setNativeLiveDVRLimits(_ limits: LiveDVRLimits, availableCapacityBytes: Int64?) -> Bool {
+        restartLock.lock()
+        let currentCache = cache
+        let currentProvider = provider
+        restartLock.unlock()
+        guard isLiveSession, let currentCache, currentProvider != nil else { return false }
+        nativeLiveDVRPolicy.update(limits, availableBytes: availableCapacityBytes, residentBytes: currentCache.totalBytes)
+        currentCache.startNativeLiveDVRExpiryChecks()
+        restartLock.lock()
+        liveRetentionRevision &+= 1
+        let schedule = !liveRetentionScheduled
+        liveRetentionScheduled = true
+        restartLock.unlock()
+        if schedule {
+            liveRetentionQueue.async { [weak self] in
+                self?.drainNativeLiveRetentionUpdates()
+            }
+        }
+        return true
+    }
+
+    private func drainNativeLiveRetentionUpdates() {
+        while true {
+            restartLock.lock()
+            let revision = liveRetentionRevision
+            let currentProvider = provider
+            restartLock.unlock()
+            currentProvider?.applyNativeLiveDVRRetention()
+            restartLock.lock()
+            let settled = liveRetentionRevision == revision
+            if settled { liveRetentionScheduled = false }
+            restartLock.unlock()
+            if settled { return }
+        }
+    }
 
     /// The 2026-09-02 field session retained 64 segments spanning more than four minutes. Cache
     /// mutations can arrive much faster than a host timeline needs to redraw, so fold them into at
@@ -1480,6 +1524,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let segmentCache = SegmentCache(
             forwardWindow: forwardWindowSegments,
             retentionBudgetBytes: retentionBudget,
+            nativeLiveDVRPolicy: isLiveSession ? nativeLiveDVRPolicy : nil,
             onResidentSetChanged: { [weak self] in self?.noteResidentSetChanged() }
         )
         self.cache = segmentCache
@@ -1937,6 +1982,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 // resident cap it can never pass.
                 retentionBudgetBytes: retentionBudgetBytes
             ),
+            nativeLiveDVRPolicy: isLiveSession ? nativeLiveDVRPolicy : nil,
             allowsBoundedDegradedStart: liveJoinProfile == .fastZap,
             boundedStartFloorsAtHoldback: LiveEdgePolicy.boundedStartFloorArmed,
             blockingReloadOverride: blockingReloadOverride,
@@ -2444,6 +2490,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// place, so a mapping stays valid for as long as the reader holds it.
     struct ScrubThumbnailSource: Sendable {
         let segmentIndex: Int
+        let startSeconds: Double
+        let durationSeconds: Double
+        let carriedOffset: Double?
+        let identity: String
         let initData: Data
         let segmentURL: URL
 
@@ -2460,7 +2510,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
         guard let prov else { return nil }
         guard let seg = prov.thumbnailSegment(atSeconds: seconds),
               let initData = prov.peekInitSegment() else { return nil }
-        return ScrubThumbnailSource(segmentIndex: seg.index, initData: initData, segmentURL: seg.fileURL)
+        anchorShiftLock.lock()
+        let carried = isLiveSession ? 0 : epochAxisByIndex.carried(at: seg.index)
+        anchorShiftLock.unlock()
+        // The cache replaces/unlinks immutable files. An index alone cannot
+        // identify bytes after a same-session re-cut/restart rewrites that index.
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: seg.fileURL.path),
+              let volume = attributes[.systemNumber] as? NSNumber,
+              let inode = attributes[.systemFileNumber] as? NSNumber,
+              let size = attributes[.size] as? NSNumber,
+              let modified = attributes[.modificationDate] as? Date else { return nil }
+        let identity = "\(volume.uint64Value):\(inode.uint64Value):\(size.uint64Value):\(modified.timeIntervalSince1970):" + initData.base64EncodedString()
+        return ScrubThumbnailSource(segmentIndex: seg.index, startSeconds: seg.startSeconds, durationSeconds: seg.durationSeconds,
+                                    carriedOffset: carried, identity: identity,
+                                    initData: initData, segmentURL: seg.fileURL)
     }
 
     public func stop() {

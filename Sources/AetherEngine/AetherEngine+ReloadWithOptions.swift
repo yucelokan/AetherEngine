@@ -1,3 +1,4 @@
+// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import AetherLibavcodec
 
@@ -393,6 +394,7 @@ enum SessionOptionCorrection {
         "panelIsInHDRMode", "attemptsHDRMasterOnUnprovenPanel", "panelPresentsDolbyVision",
         "audioBridgeMode", "isLive", "audioOnly",
         "dvrWindowSeconds",
+        "softwareDVRRetention",
         "liveBlockingReload", "liveJoinProfile", "liveJoinStartsImmediately",
         "clampsLiveResumeToWindow", "nativeRemoteHLS", "nativeRemoteHLSIngestFallback",
         "preserveASSMarkup", "prepareNativeSubtitles", "eagerNativeSubtitleReaders", "confirmAtmos",

@@ -1,3 +1,4 @@
+// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 // MARK: - Native subtitle rendition metadata
@@ -599,7 +600,19 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Sequential-origin session: playlist grows with finalized real durations (see _seqDurations).
     private let sequentialAppendPlaylist: Bool
     /// Drives both playlist firstVisible and cache eviction cutoff so they never drift.
-    private let liveWindowSizing: LiveWindowSizing
+    private let baseLiveWindowSizing: LiveWindowSizing
+    private let nativeLiveDVRPolicy: LiveDVRRetentionPolicy?
+    private var liveWindowSizing: LiveWindowSizing {
+        guard let limits = nativeLiveDVRPolicy?.snapshot else { return baseLiveWindowSizing }
+        return LiveWindowSizing(targetSegmentDurationSeconds: baseLiveWindowSizing.targetSegmentDurationSeconds,
+                                dvrWindowSeconds: limits.windowSeconds, retentionBudgetBytes: limits.retentionBytes)
+    }
+
+    /// Reconcile playlist and cache off the caller's actor; this never rebuilds the source/player.
+    func applyNativeLiveDVRRetention() {
+        guard isLive, nativeLiveDVRPolicy?.snapshot != nil else { return }
+        cache.applyNativeLiveRetentionFloor(notePlaylistBuild().firstVisible)
+    }
     /// Only `.fastZap` sessions may serve a shallow first window after a bounded grace.
     private let allowsBoundedDegradedStart: Bool
     /// AE#594 arm B: skip the bounded branch, so the wait ends at the full holdback cushion or at the
@@ -825,6 +838,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         isLive: Bool = false,
         sequentialAppendPlaylist: Bool = false,
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
+        nativeLiveDVRPolicy: LiveDVRRetentionPolicy? = nil,
         allowsBoundedDegradedStart: Bool = false,
         boundedStartFloorsAtHoldback: Bool = false,
         blockingReloadOverride: Bool? = nil,
@@ -854,7 +868,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.segments = segments
         self.isLive = isLive
         self.sequentialAppendPlaylist = sequentialAppendPlaylist
-        self.liveWindowSizing = liveWindowSizing
+        self.baseLiveWindowSizing = liveWindowSizing
+        self.nativeLiveDVRPolicy = nativeLiveDVRPolicy
         self.allowsBoundedDegradedStart = allowsBoundedDegradedStart
         self.boundedStartFloorsAtHoldback = boundedStartFloorsAtHoldback
         self.blockingReloadOverride = blockingReloadOverride
@@ -925,6 +940,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         firstSegmentCondition.lock()
         firstSegmentCondition.broadcast()
         firstSegmentCondition.unlock()
+        applyNativeLiveDVRRetention()
     }
 
     /// Append the real duration of a finalized sequential-VOD segment (index-contiguous from 0;
@@ -1006,6 +1022,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         // own lock, and nesting it inside this one would invert the ordering `evictBelow`'s async hop
         // below exists to avoid.
         let observedBytes = cache.meanEntryBytes
+        let residentFloor = nativeLiveDVRPolicy?.snapshot != nil
+            ? cache.highestResidentIndex.map { cache.contiguousBackwardFloor(from: $0) } : nil
         stateLock.lock()
         defer { stateLock.unlock() }
         refreshCounter += 1
@@ -1023,7 +1041,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             // segments exist, do not advance past 0 so AVPlayer's first
             // read sees all produced segments and can establish a live
             // edge without losing a not-yet-buffered position.
-            let newFirst = max(0, total - window)
+            let newFirst = max(0, total - window, residentFloor ?? 0)
             if newFirst > _liveFirstVisible {
                 // RFC 8216 §6.2.2: EXT-X-DISCONTINUITY-SEQUENCE must increment for each
                 // discontinuity-tagged segment that slides out; segments array is never pruned.
@@ -1185,13 +1203,13 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Pure lookup for a scrub thumbnail: no side effects, no restarts; nil outside the
     /// resident window or on a cache miss. Works for live and VOD (VOD `segments` carry
     /// `startSeconds` from init); callers gate on session type one layer up.
-    func thumbnailSegment(atSeconds seconds: Double) -> (index: Int, startSeconds: Double, fileURL: URL)? {
+    func thumbnailSegment(atSeconds seconds: Double) -> (index: Int, startSeconds: Double, durationSeconds: Double, fileURL: URL)? {
         stateLock.lock()
         let segs = segments
         stateLock.unlock()
         guard let idx = Self.thumbnailSegmentIndex(atSeconds: seconds, segments: segs) else { return nil }
         guard let url = cache.peekURL(index: idx) else { return nil }
-        return (idx, segs[idx].startSeconds, url)
+        return (idx, segs[idx].startSeconds, segs[idx].durationSeconds, url)
     }
 
     /// AE#441: the oldest position a rewind can actually land on and still play forward, in output

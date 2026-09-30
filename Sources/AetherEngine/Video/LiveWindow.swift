@@ -1,9 +1,12 @@
+// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 // Sources/AetherEngine/Video/LiveWindow.swift
 import Foundation
 
 /// Session-relative DVR timeline in seconds since first decoded frame, monotonic. `windowSeconds == nil` = live-only (no rewind).
 struct LiveWindow: Equatable {
-    let windowSeconds: Double?
+    private(set) var windowSeconds: Double?
+
+    mutating func setWindowSeconds(_ seconds: Double?) { windowSeconds = seconds }
     private(set) var edgeTime: Double = 0
     private var playhead: Double = 0
 

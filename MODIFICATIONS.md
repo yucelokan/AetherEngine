@@ -163,6 +163,11 @@ Validation on macOS 26.6.2 arm64, Xcode 26.6 (17F113), Swift 6.3.3:
   also run during correction. The final full run includes those changes.
 - A downstream package compiled against this source and passed all 125 tests,
   including a synthetic local MPEG-TS thumbnail test; none were skipped.
+- The same 125 tests also passed after removing the local editable override and
+  resolving the published integration commit
+  `0d0a4157418cfa9ae23d511e6f432977be8a27a2` from the remote `develop` branch.
+  The follow-up validation record changes documentation and trailing test-file
+  whitespace only; production source and test assertions match that tested commit.
 - `python3 Scripts/check-doc-links.py` and `git diff --check` passed.
 
 The optional skips require external/synthetic media fixtures or a supplied live

@@ -100,4 +100,3 @@ final class SoftwareDVRRetentionTests: XCTestCase {
         XCTAssertEqual(ring.seqBounds.first, ring.seqBounds.end)
     }
 }
-

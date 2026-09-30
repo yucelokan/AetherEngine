@@ -493,7 +493,7 @@ extension AetherEngine {
     @discardableResult
     public func setSoftwareLiveDVRLimits(_ limits: LiveDVRLimits, availableCapacityBytes: Int64?) -> Bool {
         guard isLive, isSessionReady, videoRoute == .software, let host = softwareHost else { return false }
-        return host.setNativeLiveDVRLimits(limits, availableBytes: availableCapacityBytes)
+        return host.setLiveDVRLimits(limits, availableBytes: availableCapacityBytes)
     }
     public var softwareLiveDVRBytes: Int64? { softwareHost?.liveDVRBytes.map(Int64.init) }
 

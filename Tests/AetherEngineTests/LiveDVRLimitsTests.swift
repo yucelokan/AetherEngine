@@ -62,6 +62,12 @@ struct LiveDVRLimitsTests {
         timeline.setWindowSeconds(policy.snapshot?.windowSeconds)
         #expect(timeline.seekableRange == nil)
         policy.update(limits, availableBytes: 2 * 1024 * 1024 * 1024, residentBytes: 0)
+        #expect(policy.snapshot?.windowSeconds == nil, "Reusing an expired sample must not renew its lease")
+        let renewed = LiveDVRLimits(windowSeconds: limits.windowSeconds,
+                                   maximumBytes: limits.maximumBytes,
+                                   minimumFreeBytes: limits.minimumFreeBytes,
+                                   capacityValidUntil: clock.now + 3)
+        policy.update(renewed, availableBytes: 2 * 1024 * 1024 * 1024, residentBytes: 0)
         #expect(policy.snapshot?.windowSeconds == 2700)
         timeline.setWindowSeconds(policy.snapshot?.windowSeconds)
         #expect(timeline.edgeTime == 100)

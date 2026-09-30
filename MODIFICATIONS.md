@@ -1,7 +1,8 @@
 # Downstream engine changes
 
-Date: 2026-09-30. Base: upstream 7.23.2,
-`95b7c31d67858dee9ec677a98507464943141b8b`.
+Date: 2026-09-30. Current base: upstream 7.24.0,
+`9bd0096892569c53c88b17219c8d259347082d30`.
+The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is supplied in
@@ -114,9 +115,60 @@ reclamation, default software opt-out, audio selection ownership, timestamp
 rollback, replay discrimination/watchdog behavior, preview cancellation/PTS and
 bounded HTTP open. Tests do not establish device acceptance or gapless playback.
 
-No build or test execution was performed for this revision. Swift syntax parsing
-and whitespace checks were performed; these do not type-check or link the code.
-Previous results from an earlier downstream tree are not results for this commit.
+The initial downstream commit received syntax and whitespace checks only.
+During the 7.24.0 integration, compilation exposed an incorrect software-host
+forwarding call: `setSoftwareLiveDVRLimits` must invoke the host's
+`setLiveDVRLimits`, not the native-session setter. That call is corrected here.
+
+## Upstream 7.24.0 integration
+
+The release merges without textual conflicts. The only files changed by both
+upstream and the original downstream commit are `AetherEngine.swift` and
+`PlayerState.swift`; their changes affect separate sections. All upstream fixes
+are retained:
+
+- The ingest join now covers the served HLS holdback plus an open-GOP margin.
+  This changes initial data acquisition, not the downstream caller-selected
+  `seekToLiveEdge(offsetSeconds:)` contract. Both can use the same measured
+  playlist target duration; no additional hardcoded return-to-live offset is
+  introduced in the engine.
+- Ingest playlist, segment and key requests participate in the existing origin
+  budget. Known playlist URLs bypass the discarded raw probe. Caller load
+  options, including optional software retention, survive that reroute.
+- Display criteria cleared by the host are reapplied. This complements the
+  downstream lifecycle observation and does not replace its audio or foreground
+  transport-intent handling.
+- Open-stage timing diagnostics are retained; bounded still extraction continues
+  to use its existing budget and quiet still-extraction profile.
+
+Local package validation is recorded for this integration below. It does not
+establish iOS/tvOS device behavior, and upstream CI's Xcode 27 lanes remain a
+separate validation surface.
+
+The integration also completes the host-facing API documentation and changelog.
+The capacity-renewal fixture now supplies a fresh caller deadline and verifies
+that resubmitting an expired sample cannot renew it. The paused stacked-reload
+fixture holds a controlled reader while observing the in-flight transport intent:
+polling the transient loading state could otherwise miss a fast reopen and wait
+until the test's time limit. Neither correction relaxes a production invariant.
+
+Validation on macOS 26.6.2 arm64, Xcode 26.6 (17F113), Swift 6.3.3:
+
+- `swift test --jobs 4` compiled the package, CLI, examples and test targets. The
+  initial run found the documentation and capacity-fixture issues described above.
+- After correction, the full `swift test --skip-build --jobs 4` run exited zero:
+  689 XCTest cases (one optional live-source skip, zero failures) and 3,961 Swift
+  Testing cases in 549 suites (30 optional fixture skips, zero issues).
+- The updated public documentation, retention and audio lifecycle suites were
+  also run during correction. The final full run includes those changes.
+- A downstream package compiled against this source and passed all 125 tests,
+  including a synthetic local MPEG-TS thumbnail test; none were skipped.
+- `python3 Scripts/check-doc-links.py` and `git diff --check` passed.
+
+The optional skips require external/synthetic media fixtures or a supplied live
+AES-128 URL. They are not passing coverage. iOS/tvOS/visionOS simulator builds,
+device playback, the standalone script regressions and the Xcode 27 CI lanes
+were not run in this local validation.
 
 Commands for validation with the supported Apple toolchain:
 

@@ -1,3 +1,4 @@
+// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import Testing
 @testable import AetherEngine
@@ -171,19 +172,30 @@ struct Issue464RebuildCallSiteTransportTests {
 
     @Test("a rebuild stacked behind that audio switch reads the paused transport, not the mount flag")
     func stackedRebuildReadsThePausedTransport() async throws {
+        let holdReloadRead = ProbeTestBox(false)
+        let reloadRead = ProbeTestGate()
+        let reader = ProbeRecordingReader(data: try ProbeTestFixtures.hdr10Plus(), afterRead: {
+            if holdReloadRead.value { reloadRead.wait() }
+        })
         let engine = try AetherEngine()
-        defer { engine.stop() }
-        _ = try await engine.load(source: Self.customSource())
+        defer { reloadRead.open(); engine.stop() }
+        _ = try await engine.load(source: .custom(reader, formatHint: "mp4"))
         engine.pause()
         let url = try #require(engine.loadedURL)
 
+        // A memory-backed reopen can enter and leave .loading between waitFor's
+        // polls. Hold its I/O until the test has observed the actual parked intent.
+        holdReloadRead.update { $0 = true }
         let rebuild = Task { @MainActor in
             await engine.reloadWithAudioOverride(
                 url: url, audioStreamIndex: nil, expectedGeneration: engine.loadGeneration)
         }
-        try await waitFor { engine.state == .loading }
+        try await waitFor { reloadRead.entered && engine.state == .loading }
         #expect(!engine.sessionRebuildResumesPlaying)
-        _ = await rebuild.value
+        reloadRead.open()
+        let failure = await rebuild.value
+        #expect(failure == nil)
+        #expect(engine.state != .playing)
     }
 
     @Test("a mount with autoplay off stays paused across a custom-source reload")

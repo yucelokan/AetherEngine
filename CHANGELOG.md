@@ -10,7 +10,35 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- Caller-configurable live DVR retention through `LiveDVRLimits`, with capacity expiry and optional software spool bounds through `SoftwareDVRRetentionOptions`. Resource budgets remain the caller's choice.
+- Measured live target duration and native item-edge accessors, plus a backward-compatible caller-supplied offset for `seekToLiveEdge`.
+- Timestamped, cancellable resident previews and a bounded one-shot still extraction API with measured optional presentation timestamps.
+
+### Fixed
+
+- Keep native live display, seek and subtitle axes consistent across source timestamp rollback; guard queued resume/seek work against newer commands.
+- Recognize exact source-packet replay conservatively before muxing, with bounded history and pending packets; preserve ordinary discontinuity handling when an overlap cannot be confirmed.
+- Apply live retention changes consistently to cache, playlist and producer admission, and recover a software feeder whose retained history was evicted.
+- Serialize/coalesce audio selections, reject stale completion errors and retain the latest transport intent during a rebuild.
+- Avoid probing AV1 hardware capability for unrelated video codecs.
+
+## [7.24.0] - 2026-09-30
+
+### Fixed
+
+- **`.fastZap` on an HLS upstream with long segments always ended at the bounded start (#678).** The served TARGETDURATION on an ingest is floored by the longest upstream segment (`ceil(longest / 1.5)`, AE#447), so a 10 s provider seals 7 and the first serve wants 21 s, but the join covered `1.5 x` the advertised target duration: two 10 s segments, 19 s once the last GOP stays open. Short by construction for every segment above ~5 s, so every zap waited out the grace on content the origin already held. The join now covers that holdback plus one GOP (at most 4 s). Measured on 10 s segments: first picture t+2.2 to 2.5 s -> t+0.22 s on loopback, t+4.1 to 4.4 s -> t+2.9 s behind a 40 Mbit/s link.
+- **The HLS live ingest ignored `maxConcurrentSourceRequests` (#678).** It charged nothing to the origin request budget and fetched four segments in parallel, so a host declaring `1` for a single-connection provider still opened four requests to it. Playlist, segment and key fetches now take a budget ticket, report refusals and redirects, and the prefetch window narrows to the limit; a direct `.custom(HLSLiveIngestReader(...))` load registers the ceiling on its playlist URL.
+- **A same-format load kept the panel in its UI mode after the host cleared the display criteria itself (#678).** The unchanged skip compared against the engine's own record only; it now also reads `preferredDisplayCriteria` back and writes again when it finds nothing set.
+
+### Changed
+
+- **A live URL known to be an HLS playlist skips the raw probe (#678).** A `.m3u8` / `.m3u` path, or a URL that already took the AE#363 reroute in this process, goes straight onto the live ingest instead of spending one discarded request per zap.
+
+### Added
+
+- **`[Demuxer] open timings`** on every playback, probe and restart open: connect, `open_input` and `find_stream_info` separately, the stream count and the probe budget, also when the stream analysis fails (#678).
 
 ## [7.23.2] - 2026-09-30
 

@@ -28,6 +28,23 @@ the public-API contract.
 - Serialize/coalesce audio selections, reject stale completion errors and retain the latest transport intent during a rebuild.
 - Avoid probing AV1 hardware capability for unrelated video codecs.
 
+## [7.25.1] - 2026-10-01
+
+### Fixed
+
+- **Cancelling the task that awaits `load()` now ends the load at once (Sodalite#173, #683).** A `.custom(HLSLiveIngestReader)` load against an unreachable provider kept running for 19 s (`open_input 18987ms` while the ingest retried its playlist), and a host that cancelled it to tune the next channel had to wait it out. The load now throws `CancellationError` within tens of milliseconds for URL and `.custom` sources, and leaves the engine the way a newer load would: `.idle`, native host and AVPlayer kept for the next load, display criteria and audio-session membership untouched; a host that leaves on cancel calls `stop()`. Generation-guarded, so a cancel never touches a session a newer `load()` or `stop()` started. A cancelled AE#629 follower also ends the software-path rebuild, nested reroutes included.
+- **A superseded custom-source `reloadAtCurrentPosition()` throws `CancellationError`** like the URL branch already did, instead of returning normally and logging a false "rebuilt on the software path".
+- **A closed `AVIOReader` no longer waits out the 0.75 s probe-fallback delay** (about 0.03 s now), which also shortens `stop()` during a URL open.
+
+## [7.25.0] - 2026-10-01
+
+### Added
+
+- **Several engines in one process share the audio session, its channel preference, the panel and Now Playing correctly (Sodalite#175, #681).** Measured with two live tiles on an Apple TV: every stop that released the session paused the OTHER engine within 10 ms, picture frozen, 4 of 4. An internal coordinator now tracks which engines are active (join on `load()`, leave on `stop()`): the session is released only by the last engine out and only when a release is owed in that round, the preferred output channel count is the widest playing source, display-criteria resets (on stop and the two load-time clears) wait for the last engine, and activation and release run on one process-wide queue (AE#538 ordering across engines). Owners are held weakly, so an engine released without `stop()` cannot pin the session. A host with one engine sees no change. See `docs/api.md`, "Running several engines at once".
+- **`LoadOptions.sharedOutputRole`** (`SharedOutputRole.primary` default, `.secondary`). A secondary never writes display criteria, skips the play-gate wait for a criteria write nobody will make, and never claims Now Playing, on the video and the audio-only path. Identity field.
+- **`AetherEngine.logTag`**: a short instance name carried by the `[SharedOutput]` lines and a `[AetherEngine:<tag>] state=` line per transition. Set it before `load()`.
+- **`aetherctl play` checks the served `.vtt` against the window its playlist declares (#680):** segments are picked at the playhead by walking EXTINF, `MISPLACED=N` names cues outside their segment's window, and an empty served `.vtt` is now a visible log line.
+
 ## [7.24.0] - 2026-09-30
 
 ### Fixed

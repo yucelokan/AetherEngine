@@ -1,7 +1,7 @@
 # Downstream engine changes
 
-Date: 2026-09-30. Current base: upstream 7.24.0,
-`9bd0096892569c53c88b17219c8d259347082d30`.
+Date: 2026-10-01. Current base: upstream 7.25.1,
+`8f3e73cd4045ff3f4ea09b40b7f1ef3b7f5068e5`.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM
@@ -189,3 +189,30 @@ selection plus pause/stop, live timestamp resets and seek across those resets,
 foreground restore, cancellation during stalled preview I/O and repeated return
 to live. The fork's current branch is not an immutable source reference; consumers
 must preserve the resolved commit and its source link for each distributed build.
+
+## Upstream 7.25.1 integration
+
+Upstream 7.25.0 adds process-wide audio-session, display-criteria and Now Playing
+coordination for multiple engine instances. Upstream 7.25.1 makes a caller's
+cancelled `load()` terminate promptly, including nested software reroutes, and
+shortens teardown while a file-size probe is waiting. Both releases are merged
+from the published upstream tag; the downstream APIs and resource policy remain.
+
+Two textual conflicts required resolution. Reload error handling retains the
+fork's cancellation check alongside upstream's generation check, so a cancelled
+or superseded reopen is not published as a playback error. File-size discovery
+retains the fork's bounded `SourceSizeProbeScope`: it cancels and joins sibling
+requests before playback takes the origin slot. This already observes reader
+closure while waiting; an unresolved result is logged only for an open reader.
+A controlled probe checks its stop reason before the reader-close signal after
+size discovery, so a deadline still reports `ProbeError.timedOut`.
+The published upstream tests for load cancellation and shared output remain in
+the fork alongside the existing source-open recovery tests.
+
+Validation for this integration on macOS 27.0.1, Xcode 27.0, Swift 6.4:
+`swift test --skip-build --jobs 4` completed 672 AetherEngine XCTest cases
+(one optional fixture skip), 17 SMB XCTest cases and 4,017 Swift Testing
+cases in 556 suites (31 optional fixture skips), with zero failures. The
+package, CLI, examples and tests were compiled in
+the preceding focused `swift test` run. The final full run followed the probe
+error-classification correction. It does not establish iOS/tvOS device playback.

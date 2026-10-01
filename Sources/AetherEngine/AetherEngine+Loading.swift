@@ -323,7 +323,8 @@ extension AetherEngine {
     /// which is the point, since re-creating it is what breaks AVKit's MediaRemote registration.
     func makeNativeHost() -> NativeAVPlayerHost {
         #if os(tvOS) || os(iOS)
-        return NativeAVPlayerHost(ownsNowPlayingSession: ownsVideoNowPlayingSession)
+        return NativeAVPlayerHost(ownsNowPlayingSession: Self.ownsNowPlaying(
+            hostOptIn: ownsVideoNowPlayingSession, role: loadedOptions.sharedOutputRole))
         #else
         return NativeAVPlayerHost()
         #endif
@@ -1794,6 +1795,14 @@ extension AetherEngine {
                       // report the same two channels.
                       audioIsAtmosStreamCopy: nativeVideoSession?.audioIsAtmosStreamCopy == true))
         forceNativeLegibleDeselectedUntilHostSelects()
+        // Sodalite#175: from the session's own pick, since a track-switch reload has no active index yet.
+        let sessionAudioPick = nativeVideoSession.map(\.activeAudioSourceStreamIndex).flatMap { $0 >= 0 ? Int($0) : nil }
+        let audioPick = sessionAudioPick ?? audioSourceStreamIndex.flatMap { Int(exactly: $0) } ?? activeAudioTrackIndex
+        let pickTracks = nativeVideoSession.map(\.companionAudioTracks).flatMap { $0.isEmpty ? nil : $0 } ?? audioTracks
+        SharedOutputCoordinator.shared.noteSourceChannels(
+            audioPick.flatMap { index in pickTracks.first { $0.id == index }?.channels }
+                .flatMap { $0 > 0 ? $0 : nil },
+            for: ObjectIdentifier(self))
         // AE#458: what AVFoundation makes of the audio rendition this load just served, which is the
         // half of the exchange no log has ever carried.
         logAudibleReadback(host: host)
@@ -1821,8 +1830,10 @@ extension AetherEngine {
         } else {
             nil
         }
+        SharedOutputCoordinator.shared.noteSourceChannels(sourceChannels, for: ObjectIdentifier(self))
+        let preferred = SharedOutputCoordinator.shared.preferredSourceChannels ?? sourceChannels
         await enqueueAudioSessionTransition {
-            AetherEngine.applyRendererAudioSession(sourceChannels: sourceChannels)
+            AetherEngine.applyRendererAudioSession(sourceChannels: preferred)
         }.value
         #endif
     }
@@ -2115,7 +2126,9 @@ extension AetherEngine {
         // Reuse the persistent host (MPNowPlayingSession survives across tracks). host.load() swaps the item via replaceCurrentItem.
         await activateRendererAudioSession()
         try checkLoadCurrent(generation)
-        let host = audioAVPlayerHost ?? AudioAVPlayerHost()
+        let ownsNowPlaying = Self.ownsNowPlaying(hostOptIn: true, role: loadedOptions.sharedOutputRole)
+        let host = audioAVPlayerHost ?? AudioAVPlayerHost(ownsNowPlaying: ownsNowPlaying)
+        host.ownsNowPlaying = ownsNowPlaying
         self.audioAVPlayerHost = host
         applyDesiredVolume(to: host)
         self.audioAVPlayerActive = true
@@ -2369,7 +2382,11 @@ extension AetherEngine {
                     return d
                 }.value
             } catch {
-                guard loadGeneration == gen, !Task.isCancelled else { return nil }
+                // A superseded or caller-cancelled reopen is not a reload failure.
+                if loadGeneration != gen || Task.isCancelled {
+                    EngineLog.emit("[AetherEngine] reload superseded during custom reader reopen; unwinding", category: .engine)
+                    return nil
+                }
                 EngineLog.emit("[AetherEngine] reload: custom reader reopen failed: \(error)", category: .engine)
                 activeAudioTrackIndex = previousAudioIndex
                 publishError(.reloadFailed, "Reload failed: \(error.localizedDescription)", underlying: error)
@@ -2395,7 +2412,11 @@ extension AetherEngine {
                     return d
                 }.value
             } catch {
-                guard loadGeneration == gen, !Task.isCancelled else { return nil }
+                // A superseded or caller-cancelled reopen is not a reload failure.
+                if loadGeneration != gen || Task.isCancelled {
+                    EngineLog.emit("[AetherEngine] reload superseded during disc URL reopen; unwinding", category: .engine)
+                    return nil
+                }
                 EngineLog.emit("[AetherEngine] reload: disc URL reopen failed: \(error)", category: .engine)
                 activeAudioTrackIndex = previousAudioIndex
                 publishError(.reloadFailed, "Reload failed: \(error.localizedDescription)", underlying: error)
@@ -2547,7 +2568,8 @@ extension AetherEngine {
                         criteriaUnchanged: false,
                         engineIsCriteriaWriter: !loadedOptions.suppressDisplayCriteria,
                         formatKnown: true,
-                        effectiveFormat: videoFormat
+                        effectiveFormat: videoFormat,
+                        noWriterExpected: loadedOptions.sharedOutputRole == .secondary
                     ),
                     settleCap: loadedOptions.isLive ? .standard : .awaitObservedEnd,
                     isCurrent: { self.loadGeneration == gen })

@@ -1163,8 +1163,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     }
 
     func open() throws {
-        guard !isClosed else { throw CancellationError() }
         try probeControl?.check()
+        guard !isClosed else { throw CancellationError() }
         guard let buf = av_malloc(Int(Self.avioBufferSize)) else {
             throw AVIOReaderError.allocationFailed
         }
@@ -1309,8 +1309,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                         // resilience to all of those cases (issue #70 review #1/#3/#4).
                         EngineLog.emit("[AVIOReader] Data connection resolved no size, falling back to probe", category: .demux, level: .verbose)
                         fileSize = resolveInitialFileSize()
-                        guard !isClosed else { throw CancellationError() }
                         try probeControl?.check()
+                        guard !isClosed else { throw CancellationError() }
                     }
                     if isStreaming {
                         startStreamingDownload()
@@ -1378,6 +1378,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // Non-prefetch (still extraction / one-shot seekable): the size is needed up
             // front for SEEK_END and container index seeks, so keep the dedicated probe.
             fileSize = resolveInitialFileSize()
+            // A controlled probe's deadline/cancellation reason wins over the reader-close
+            // signal used to interrupt its in-flight request.
+            try probeControl?.check()
             guard !isClosed else { throw CancellationError() }
             if isStreaming {
                 startStreamingDownload()
@@ -4120,10 +4123,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 }
             }
         }
-        // Winner, deadline and teardown all join the workers: no losing HEAD/probe keeps the
-        // origin's last slot while the playback pump is trying to resume.
+        // The scoped deadline and cancellation also observe a closed reader. Join every probe
+        // before resuming playback so a losing request cannot occupy the origin's last slot.
         let size = scope.join { [weak self] in self?.isClosed ?? true }
-        if size <= 0 {
+        if size <= 0, !isClosed {
             EngineLog.emit("[SourceOpen] reader=\(openDiagnosticID) phase=size-probes result=unresolved", category: .demux)
         }
         return size

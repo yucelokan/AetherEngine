@@ -1,3 +1,4 @@
+// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import os
 import AetherLibavformat
@@ -1237,7 +1238,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 rangeVerdictPending = !isLive
                 winCond.unlock()
                 startPersistentConnection(at: 0, boundedTo: boundedInitialFetch)
-                gotData = awaitFirstPersistentData()
+                gotData = try recoverUnansweredOpenIfNeeded(gotData: awaitFirstPersistentData())
                 openPrefix = firstWindowPrefix()
             }
             // AE#140: an HLS playlist URL misrouted onto the raw-byte live path. A live origin serves the
@@ -1408,10 +1409,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Wait for the persistent connection's first window bytes within the open policy. The response
     /// (and thus any Content-Range size) has already been processed by the time data
     /// arrives. Demux thread, open-time only. Returns true if data arrived.
-    private func awaitFirstPersistentData() -> Bool {
+    private func awaitFirstPersistentData(timeout: TimeInterval? = nil, phase: String = "first-data") -> Bool {
         winCond.lock()
         let started = DispatchTime.now()
-        let budget = isLive ? 15 : sourceOpenPolicy.firstByteTimeout
+        let budget = timeout ?? (isLive ? 15 : sourceOpenPolicy.firstByteTimeout)
         let deadline = Date(timeIntervalSinceNow: budget)
         while window.isEmpty && !connEnded && !isClosed {
             if !winCond.wait(until: deadline) { break }
@@ -1423,8 +1424,43 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let knownSize = fileSize
         winCond.unlock()
         let elapsed = Double(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds) / 1_000_000
-        EngineLog.emit("[SourceOpen] reader=\(openDiagnosticID) phase=first-data gen=\(generation) result=\(result) elapsed_ms=\(Int(elapsed)) budget=\(budget)s status=\(status) size=\(knownSize)", category: .demux)
+        EngineLog.emit("[SourceOpen] reader=\(openDiagnosticID) phase=\(phase) gen=\(generation) result=\(result) elapsed_ms=\(Int(elapsed)) budget=\(budget)s status=\(status) size=\(knownSize)", category: .demux)
         return gotData
+    }
+
+    /// A timeout is not evidence that the origin cannot seek. Retry the data request once,
+    /// using the alternate open-ended Range shape, and keep its body for playback. Metadata-only
+    /// probes would discard that body and open yet another connection, or silently downgrade an
+    /// unanswered seekable resource to a forward-only stream. A definitive response still takes
+    /// the ordinary range-validation/refusal path below. Known-size slow bodies keep their pump.
+    private func recoverUnansweredOpenIfNeeded(gotData: Bool) throws -> Bool {
+        guard !isLive, !gotData else { return gotData }
+        try probeControl?.check()
+        guard !isClosed else { throw CancellationError() }
+        winCond.lock()
+        let unanswered = fileSize <= 0 && connStatus == 0 && window.isEmpty
+        winCond.unlock()
+        guard unanswered else { return gotData }
+        // A trust failure cannot be repaired by changing the Range header.
+        try failIfStreamingRefused(fallbackStatus: 0)
+        EngineLog.emit("[SourceOpen] reader=\(openDiagnosticID) phase=data-retry reason=no-response budget=\(sourceOpenPolicy.sizeProbeTimeout)s", category: .demux)
+        startPersistentConnection(at: 0, openEnded: true)
+        let recovered = awaitFirstPersistentData(timeout: sourceOpenPolicy.sizeProbeTimeout,
+                                                  phase: "data-retry")
+        try probeControl?.check()
+        guard !isClosed else { throw CancellationError() }
+        try failIfStreamingRefused(fallbackStatus: 0)
+        winCond.lock()
+        let unresolved = fileSize <= 0 && connStatus == 0 && window.isEmpty
+        let ended = connEnded
+        winCond.unlock()
+        if unresolved {
+            EngineLog.emit("[SourceOpen] reader=\(openDiagnosticID) phase=failed reason=no-response seekability=unknown not downgrading to sequential", category: .demux)
+            markClosed()
+            close()
+            throw ended ? AVIOReaderError.noResponse : AVIOReaderError.requestTimeout
+        }
+        return recovered
     }
 
     /// The streaming GET was answered with a status instead of a body, or the ranged open was
@@ -3073,7 +3109,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Open a fresh Range: bytes=<offset>- connection (live: always `bytes=0-`, see the
     /// request construction below). Bumps generation so late callbacks from the old
     /// connection are ignored.
-    private func startPersistentConnection(at offset: Int64, boundedTo: Int64? = nil) {
+    private func startPersistentConnection(at offset: Int64, boundedTo: Int64? = nil, openEnded: Bool = false) {
         winCond.lock()
         connGeneration &+= 1
         let generation = connGeneration
@@ -3090,6 +3126,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         // instead, and asking for a finite range would put the request cadence straight back. An
         // explicit caller bound still wins, because that caller wants a specific amount read.
         let resolvedBound: Int64? = boundedTo ?? {
+            guard !openEnded else { return nil }
             guard !heldConnectionEnabled else { return nil }
             guard !isLive else { return nil }
             // fileSize is still 0 on the very first connection, since the response's

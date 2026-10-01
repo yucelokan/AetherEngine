@@ -1,7 +1,11 @@
+// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 /// HTTP VOD startup policy. These budgets bound the initial data wait and the entire fallback
-/// file-size discovery respectively, not decoding, seeking, or the lifetime of playback.
+/// recovery respectively, not decoding, seeking, or the lifetime of playback. An unanswered
+/// data request retries once within `sizeProbeTimeout`, retaining the recovered body. If neither
+/// request answers, opening fails instead of classifying the source as forward-only. Size-only
+/// discovery remains available for responses that actually arrive without a usable length.
 public struct SourceOpenPolicy: Sendable, Equatable {
     public let firstByteTimeout: TimeInterval
     public let sizeProbeTimeout: TimeInterval

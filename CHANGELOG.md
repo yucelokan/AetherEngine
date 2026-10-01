@@ -12,6 +12,8 @@ the public-API contract.
 
 ### Added
 
+- `AetherEngine.isSourceSeekable` and `canSeek` expose measured source/session capabilities; forward-only VOD seeks report `sourceNotSeekable`.
+
 - Opt-in `LoadOptions.liveStartupSingleSegmentMinimumSeconds` for long-GOP `.fastZap` sources: admit sufficiently long completed first segments through the existing grace without waiting for another full GOP. Default two-segment admission and live-edge holdback remain unchanged.
 
 - Configurable `.fastZap` startup grace and HTTP VOD opening budgets through `LoadOptions.liveStartupGraceSeconds` and `SourceOpenPolicy`, independent of live-edge holdback.
@@ -21,6 +23,9 @@ the public-API contract.
 - Timestamped, cancellable resident previews and a bounded one-shot still extraction API with measured optional presentation timestamps.
 
 ### Fixed
+
+- Retry an unanswered HTTP VOD data open once within the recovery budget, retaining the successful response body. Exhausted unanswered requests fail as transport errors instead of silently disabling seek or repeating the opening ladder.
+- Reject seeks and ignore saved positions on forward-only VOD. Native seek completion requires success and an actual landing; clock, subtitle anchors and diagnostics use that measured landing.
 
 - Admit subsequent live playlist requests without repeating the first-manifest startup grace; preserve cancellation, holdback and blocking-reload behavior.
 - Serialize fallback file-size probes on single-request origins, share a discovery deadline, and cancel/join losing probes before playback resumes.

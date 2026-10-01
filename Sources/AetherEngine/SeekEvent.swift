@@ -1,3 +1,4 @@
+// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 /// One statement about a seek's lifecycle: its outcome and the target it belonged to, in a single value
@@ -41,6 +42,8 @@ public struct SeekEvent: Sendable, Equatable {
         case noActiveSession
         /// Live source without a DVR window; there is no seekable range to land in.
         case liveWithoutDVR
+        /// The source can only be read forwards; a duration does not make it seekable.
+        case sourceNotSeekable
     }
 
     public enum Outcome: Sendable, Equatable {

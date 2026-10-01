@@ -50,6 +50,41 @@ The real-media script in `Scripts/test-long-gop-startup.sh` covers 5/10-second
 H.264 GOPs with B-frames, AAC, paced delivery, AVPlayer clock progression, rewind
 and live return on macOS. Physical iOS/tvOS validation remains a host obligation.
 
+## VOD opening and seek capability
+
+An unanswered HTTP data open retries once with an open-ended Range request within
+`SourceOpenPolicy.sizeProbeTimeout`. The successful response remains the playback
+connection. Two unanswered requests fail as a transport error, without size-only
+speculation, a silent forward-only downgrade or another full engine open. A known
+size with a delayed body retains its original connection. Actual range-ignoring
+and length-less responses retain their existing forward-only handling.
+
+`isSourceSeekable` describes the measured byte source (nil when unknown or owned
+by AVFoundation); `canSeek` describes the active session. A duration is not proof
+of seekability. Remote HLS uses the native item's measured range. Forward-only
+VOD ignores saved positions and rejects arbitrary seeks as `sourceNotSeekable`.
+Native completion checks AVPlayer's completion flag and measured position before
+reporting a landing, preserving the current load/seek generation fences. Logs
+include requested/actual positions, completion status and the recovery phase.
+
+Caller request limits and timeout values remain outside engine policy. The
+engine does not introduce provider-specific defaults. The loopback fixture in
+`Scripts/test-vod-open-seek.sh` tests a silent initial request, recovered native
+forward/backward/paused seeks and honest sequential playback. Reader tests cover
+body truncation, unanswered requests, cancellation and existing refusal paths.
+
+### Validation of the VOD correction
+
+Validated the modified working tree on macOS 27.0.1 / Xcode 27.0 (27A266a):
+93 focused tests across 14 source-opening and seek suites passed. The two real
+AVPlayer scenarios in `Scripts/test-vod-open-seek.sh` also passed with a synthetic
+H.264/AAC/SubRip MKV served over loopback. They cover recovery from a silent
+first request, subtitle delivery with a single source-request slot, forward,
+backward and paused seeks, and rejection of seeks on a sequential source.
+The existing 5 s and 10 s GOP live scenarios also passed, including rewind and
+return to live. This is macOS evidence; physical iOS/tvOS provider playback is not established
+by these tests. No application archive or device build was made for this change.
+
 ## Internal corrections
 
 ### Live timeline and source overlap

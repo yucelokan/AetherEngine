@@ -1,4 +1,4 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
+// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import CoreGraphics
 
@@ -564,12 +564,22 @@ public struct LoadOptions: Sendable, Equatable {
     /// (AetherEngine#195/#208).
     public var liveJoinProfile: LiveJoinProfile = .standard
 
-    /// Extra wait after two finalized segments for `.fastZap` loopback live joins.
+    /// Extra wait after an eligible finalized window for `.fastZap` loopback live joins.
     /// Nil uses the observed segment duration clamped to 0.5...2 seconds. Zero serves immediately
-    /// once both segments exist. Invalid or negative values use the automatic policy.
+    /// once the minimum media exists. Invalid or negative values use the automatic policy.
     /// A shorter grace can increase early rebuffering on irregular sources. This does not change
-    /// TARGETDURATION, HOLD-BACK, the two-segment minimum, or `.standard` joins.
+    /// TARGETDURATION, HOLD-BACK, or `.standard` joins. The minimum is two segments unless
+    /// `liveStartupSingleSegmentMinimumSeconds` explicitly permits a sufficiently long first one.
     public var liveStartupGraceSeconds: Double? = nil
+
+    /// Opt-in minimum media duration for starting a `.fastZap` loopback live session with one
+    /// finalized segment. Nil retains the two-segment minimum. A finite, positive value allows a
+    /// single segment at least that long to enter the same bounded-start grace; shorter segments
+    /// still need a second segment. This avoids waiting for another full GOP on long-GOP sources.
+    /// It does not change segment boundaries, TARGETDURATION, HOLD-BACK or `.standard` joins.
+    /// A shallow initial playlist can rebuffer if the next segment arrives late. Hosts choose
+    /// this latency/resilience tradeoff; invalid values preserve the two-segment minimum.
+    public var liveStartupSingleSegmentMinimumSeconds: Double? = nil
 
     /// HTTP VOD opening budgets. Applied to the initial playback reader and its reopens;
     /// live, sequential-only sources and disposable frame probes retain their own policies.
@@ -906,6 +916,7 @@ public struct LoadOptions: Sendable, Equatable {
         liveBlockingReload: Bool? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
         liveStartupGraceSeconds: Double? = nil,
+        liveStartupSingleSegmentMinimumSeconds: Double? = nil,
         sourceOpenPolicy: SourceOpenPolicy = .init(),
         liveJoinStartsImmediately: Bool = true,
         clampsLiveResumeToWindow: Bool = true,
@@ -952,6 +963,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.liveBlockingReload = liveBlockingReload
         self.liveJoinProfile = liveJoinProfile
         self.liveStartupGraceSeconds = liveStartupGraceSeconds
+        self.liveStartupSingleSegmentMinimumSeconds = liveStartupSingleSegmentMinimumSeconds
         self.sourceOpenPolicy = sourceOpenPolicy
         self.liveJoinStartsImmediately = liveJoinStartsImmediately
         self.clampsLiveResumeToWindow = clampsLiveResumeToWindow

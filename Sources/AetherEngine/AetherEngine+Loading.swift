@@ -1,4 +1,4 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
+// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import AVFoundation
 import Combine
@@ -838,6 +838,7 @@ extension AetherEngine {
             // path only for the host's explicit fastZap profile.
             liveJoinProfile: loadedOptions.liveJoinProfile,
             liveStartupGraceSeconds: loadedOptions.liveStartupGraceSeconds,
+            liveStartupSingleSegmentMinimumSeconds: loadedOptions.liveStartupSingleSegmentMinimumSeconds,
             sourceOpenPolicy: loadedOptions.sourceOpenPolicy,
             blockingReloadOverride: loadedOptions.liveBlockingReload,
             liveCadenceObservation: liveCadenceObservation,

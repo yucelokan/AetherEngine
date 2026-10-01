@@ -717,7 +717,7 @@ whose GOPs run 1.0 to 2.4 s sealed TARGETDURATION 1 on its first three and then 
 on every longer one (AE#670). 1 s GOPs therefore serve TARGETDURATION 2 and a 6 s holdback. Ingested
 segments are bounded by the upstream's own target duration and keep `ceil(max EXTINF)`.
 
-`LoadOptions.liveStartupGraceSeconds` controls the extra wait after two finalized segments on
+`LoadOptions.liveStartupGraceSeconds` controls the extra wait after an eligible finalized window on
 `.fastZap` loopback joins. Nil preserves the observed-duration grace (0.5...2 seconds); zero admits
 the window immediately at that minimum. Nonfinite or negative values use the automatic policy;
 finite values are capped at 120 seconds and the existing manifest deadline still bounds the wait.
@@ -725,6 +725,18 @@ This can trade earlier picture for an early rebuffer on irregular sources. It ch
 `TARGETDURATION` nor `HOLD-BACK`, and has no effect on `.standard` joins or remote HLS bypass.
 Admission lasts for the provider: plain playlist refreshes do not restart the grace, while
 `_HLS_msn` blocking reloads still wait for their requested segment and cancellation always wins.
+
+`LoadOptions.liveStartupSingleSegmentMinimumSeconds` optionally admits a single completed
+segment through that same `.fastZap` grace when it contains at least the requested media duration.
+Nil (the default), nonpositive and nonfinite values retain the two-segment minimum. Short first
+segments still need a second segment. This is useful on raw live sources with long GOPs: the
+engine cannot safely cut before a keyframe, and waiting for two completed GOPs can add a whole
+GOP of startup latency. This option neither forces early cuts nor reduces advertised holdback;
+`.standard`, explicit holdback floors and remote HLS bypass are unchanged. Hosts own the
+threshold and the shallow-window rebuffering tradeoff, including device/source validation.
+`Scripts/test-long-gop-startup.sh` generates synthetic 5 s and 10 s H.264/AAC GOP fixtures and
+checks real macOS AVPlayer startup, ongoing playback, rewind and live return. Set `FFMPEG_BIN`
+if FFmpeg is not on PATH. It does not establish physical iOS/tvOS coverage.
 
 **An HLS source with a window of its own now fills that cushion at the join rather than in wall clock**
 (6.77.0). The ingest used to enter a live playlist three segments behind the edge, and three joined
@@ -992,7 +1004,8 @@ All flags default to safe values; the table is the full set. Depth for the media
 | `dvrWindowSeconds` | nil | Timeshift window. nil means live-only and `seek` is a no-op. The window is a ceiling: the disk budget (a quarter of the free space, at most 2 GiB) bounds what is actually kept, so a long window on a high-bitrate channel or a small volume holds less than it asks for. |
 | `softwareDVRRetention` | nil | Optional `SoftwareDVRRetentionOptions` for a live packet spool. Enables caller-selected startup and fallback limits plus runtime renewal through `setSoftwareLiveDVRLimits`. Nil preserves the default spool behavior. |
 | `liveJoinProfile` | `.standard` | A `LiveJoinProfile`. `.fastZap` collapses TARGETDURATION to 1.5 x the source GOP (AE#670) so an IPTV join costs seconds instead of a full holdback. |
-| `liveStartupGraceSeconds` | nil | Optional extra wait after two finalized segments on `.fastZap` loopback live joins; zero opts into immediate admission. Independent of live-edge safety. |
+| `liveStartupGraceSeconds` | nil | Optional extra wait after eligible finalized media on `.fastZap` loopback live joins; zero opts into immediate admission. Independent of live-edge safety. |
+| `liveStartupSingleSegmentMinimumSeconds` | nil | Opt-in minimum duration of one finalized segment for `.fastZap` admission; nil retains two segments. Does not alter cuts or holdback. |
 | `sourceOpenPolicy` | `SourceOpenPolicy()` | HTTP VOD opening budgets: `firstByteTimeout` defaults to 15 s; `sizeProbeTimeout` defaults to 25 s shared by all fallback size probes, including slot waits. Positive finite values are capped at 120 s; invalid values use defaults. Does not cap decoding, playback, or later reads. Live/sequential-only sources, native remote HLS and disposable probes retain their own policies. |
 | `clampsLiveResumeToWindow` | true | Whether `play()` may move a behind-live playhead by itself (edge snap on a live-only source more than 45 s behind, or a landing above the retained floor when a DVR window has slid past it). `false` hands the whole decision to the host, which then also owns the eviction case. |
 | `liveJoinStartsImmediately` | true | Cuts AVPlayer's stall-avoidance wait short once at the live join, over a buffer that is non-empty and at least 1.5 s deep. The join tail no host can otherwise reach; default since 6.55.0 on a device A/B, see the live-join section. |

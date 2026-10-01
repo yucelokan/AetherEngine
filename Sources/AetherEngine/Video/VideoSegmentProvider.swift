@@ -1,4 +1,4 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
+// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 // MARK: - Native subtitle rendition metadata
@@ -616,9 +616,11 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// Only `.fastZap` sessions may serve a shallow first window after a bounded grace.
     private let allowsBoundedDegradedStart: Bool
     private let startupGraceSeconds: TimeInterval?
+    private let singleSegmentStartupMinimumSeconds: TimeInterval?
     /// Protected by firstSegmentCondition. Successful admission is separate from diagnostic
     /// accounting: a timed-out empty window must never admit a later request.
     private var startupAdmitted = false
+    private var didLogStartupPolicy = false
     /// AE#594 arm B: skip the bounded branch, so the wait ends at the full holdback cushion or at the
     /// outer wall-clock deadline. Measurement arm, off unless the environment asks for it.
     private let boundedStartFloorsAtHoldback: Bool
@@ -845,6 +847,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         nativeLiveDVRPolicy: LiveDVRRetentionPolicy? = nil,
         allowsBoundedDegradedStart: Bool = false,
         startupGraceSeconds: TimeInterval? = nil,
+        singleSegmentStartupMinimumSeconds: TimeInterval? = nil,
         boundedStartFloorsAtHoldback: Bool = false,
         blockingReloadOverride: Bool? = nil,
         liveCadencePolicy: LiveCadencePolicy? = nil,
@@ -876,6 +879,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.baseLiveWindowSizing = liveWindowSizing
         self.nativeLiveDVRPolicy = nativeLiveDVRPolicy
         self.allowsBoundedDegradedStart = allowsBoundedDegradedStart
+        self.singleSegmentStartupMinimumSeconds = singleSegmentStartupMinimumSeconds.flatMap {
+            $0.isFinite && $0 > 0 ? $0 : nil
+        }
         self.startupGraceSeconds = startupGraceSeconds.flatMap {
             $0.isFinite && $0 >= 0 ? min(120, $0) : nil
         }
@@ -2417,12 +2423,21 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         return (segments.count, summed, maxDuration)
     }
 
+    /// Only completed, independently decodable media participates. The optional duration threshold
+    /// never cuts a GOP early or weakens the standard/full-holdback path.
+    private func hasBoundedStartupMedia(_ snapshot: (count: Int, summed: Double, maxDuration: Double)) -> Bool {
+        if snapshot.count >= LiveEdgePolicy.minStartupSegments { return true }
+        guard snapshot.count == 1, let minimum = singleSegmentStartupMinimumSeconds else { return false }
+        return snapshot.summed.isFinite && snapshot.summed >= minimum
+    }
+
     /// Block until the first live window holds the live-edge holdback (3 x TARGETDURATION) of content, so
     /// AVPlayer's initial seek to edge-minus-holdback lands inside the window instead of its stall-danger
     /// zone (-16832; AE#189). A `.fastZap` session may take the explicitly bounded shallow-window path
     /// after two segments and one clamped segment-duration grace (AE#208). `.standard` never takes it.
-    /// Both paths avoid -12888 on an empty or single-segment playlist. The gate and served playlist use
-    /// the same sealed TARGETDURATION.
+    /// A caller may also admit one sufficiently long finalized segment through the same bounded path.
+    /// Empty and short single-segment windows still wait. The gate and served playlist use the same
+    /// sealed TARGETDURATION; this changes initial admission only, not live-edge safety or reloads.
     func waitForFirstLiveSegment(timeout: TimeInterval) -> Bool {
         guard isLive else { return true }
         let deadline = Date().addingTimeInterval(timeout)
@@ -2439,6 +2454,12 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         while true {
             if waitersCancelled { return false }
             if startupAdmitted { return true }
+            if !didLogStartupPolicy {
+                didLogStartupPolicy = true
+                let grace = startupGraceSeconds.map(LiveEdgePolicy.seconds) ?? "auto"
+                let single = singleSegmentStartupMinimumSeconds.map(LiveEdgePolicy.seconds) ?? "off"
+                EngineLog.emit("[HLSVideoEngine] live startup policy: bounded=\(allowsBoundedDegradedStart) grace=\(grace) singleSegmentMinimum=\(single) holdbackFloor=\(boundedStartFloorsAtHoldback)", category: .session)
+            }
             let snap = liveCushionSnapshot()
             let target = currentLiveTargetDuration(maxSegmentDuration: snap.maxDuration)
             if LiveEdgePolicy.startupCushionSatisfied(segmentCount: snap.count,
@@ -2451,7 +2472,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
             }
             if allowsBoundedDegradedStart,
                !boundedStartFloorsAtHoldback,
-               snap.count >= LiveEdgePolicy.minStartupSegments,
+               hasBoundedStartupMedia(snap),
                degradedDeadline == nil {
                 let grace = startupGraceSeconds ?? LiveEdgePolicy.fastZapDegradedGraceSeconds(
                     maxSegmentDuration: snap.maxDuration
@@ -2475,7 +2496,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 }
                 if let degradedDeadline,
                    Date() >= degradedDeadline,
-                   after.count >= LiveEdgePolicy.minStartupSegments {
+                   hasBoundedStartupMedia(after) {
                     let sealed = sealLiveTargetDuration(afterTarget)
                     // AE#374: the grace is the last leg of this wait, not the wait. Reporting it alone
                     // left a bounded start reading as a half-second one when it had held for twelve.

@@ -4,14 +4,15 @@ import Testing
 
 @Suite(.timeLimit(.minutes(2)))
 struct LiveStartupAdmissionTests {
-    private func provider(grace: Double? = nil, fast: Bool = true) -> (VideoSegmentProvider, SegmentCache) {
+    private func provider(grace: Double? = nil, fast: Bool = true, singleSegmentMinimum: Double? = nil, holdbackFloor: Bool = false) -> (VideoSegmentProvider, SegmentCache) {
         let cache = SegmentCache(forwardWindow: 10, backwardWindow: 10)
         let provider = VideoSegmentProvider(cache: cache, segments: [],
             codecsString: "avc1.640029,mp4a.40.2", supplementalCodecs: nil,
             resolution: (1920, 1080), videoRange: .sdr, frameRate: 25,
             hdcpLevel: nil, sourceBitrate: 4_000_000, isLive: true,
             liveWindowSizing: .init(targetSegmentDurationSeconds: 0.5, dvrWindowSeconds: nil),
-            allowsBoundedDegradedStart: fast, startupGraceSeconds: grace)
+            allowsBoundedDegradedStart: fast, startupGraceSeconds: grace,
+            singleSegmentStartupMinimumSeconds: singleSegmentMinimum, boundedStartFloorsAtHoldback: holdbackFloor)
         return (provider, cache)
     }
 
@@ -78,4 +79,77 @@ struct LiveStartupAdmissionTests {
         provider.cancelWaiters()
         #expect(try await !job.outcome().get())
     }
+
+    @Test("A caller may admit one sufficiently long completed segment without changing holdback")
+    func longSingleSegment() {
+        let (provider, cache) = provider(grace: 0, singleSegmentMinimum: 5)
+        defer { provider.cancelWaiters(); cache.close() }
+        append(provider, 0)
+        let started = ContinuousClock.now
+        #expect(provider.waitForFirstLiveSegment(timeout: 5))
+        #expect(started.duration(to: .now) < .seconds(0.5))
+        #expect(provider.sealedLiveTargetDurationSeconds == 15)
+        #expect(HLSLocalServer.buildMediaPlaylistText(provider: provider).contains("HOLD-BACK=45.000"))
+    }
+
+    @Test("A short first segment still waits, even when single-segment startup is enabled")
+    func shortSingleSegment() async throws {
+        let (provider, cache) = provider(grace: 0, singleSegmentMinimum: 5)
+        defer { provider.cancelWaiters(); cache.close() }
+        provider.appendLiveSegment(index: 0, startSeconds: 0, durationSeconds: 2)
+        let job = ProbeTestJob { provider.waitForFirstLiveSegment(timeout: 30) }
+        try await waitFor { provider.parkedWaiterCount == 1 }
+        #expect(!(try await waitFor(upTo: .milliseconds(100)) { job.isFinished }))
+        provider.appendLiveSegment(index: 1, startSeconds: 2, durationSeconds: 2)
+        #expect(try await job.outcome().get())
+    }
+
+    @Test("An invalid threshold keeps the two-segment default", arguments: [0.0, -1.0, .infinity, .nan])
+    func invalidSingleSegmentThreshold(_ threshold: Double) async throws {
+        let (provider, cache) = provider(grace: 0, singleSegmentMinimum: threshold)
+        defer { provider.cancelWaiters(); cache.close() }
+        append(provider, 0)
+        let job = ProbeTestJob { provider.waitForFirstLiveSegment(timeout: 30) }
+        try await waitFor { provider.parkedWaiterCount == 1 }
+        #expect(!(try await waitFor(upTo: .milliseconds(100)) { job.isFinished }))
+        provider.cancelWaiters()
+        #expect(try await !job.outcome().get())
+    }
+
+    @Test("A single-segment threshold does not bypass a standard join")
+    func standardIgnoresSingleSegmentThreshold() async throws {
+        let (provider, cache) = provider(grace: 0, fast: false, singleSegmentMinimum: 5)
+        defer { provider.cancelWaiters(); cache.close() }
+        append(provider, 0)
+        let job = ProbeTestJob { provider.waitForFirstLiveSegment(timeout: 30) }
+        try await waitFor { provider.parkedWaiterCount == 1 }
+        #expect(!(try await waitFor(upTo: .milliseconds(100)) { job.isFinished }))
+        provider.cancelWaiters()
+        #expect(try await !job.outcome().get())
+    }
+
+    @Test("Single-segment admission still observes the configured grace")
+    func singleSegmentGrace() {
+        let (provider, cache) = provider(grace: 0.2, singleSegmentMinimum: 5)
+        defer { provider.cancelWaiters(); cache.close() }
+        append(provider, 0)
+        let started = ContinuousClock.now
+        #expect(provider.waitForFirstLiveSegment(timeout: 5))
+        #expect(started.duration(to: .now) >= .milliseconds(190))
+        provider.cancelWaiters()
+        #expect(!provider.waitForFirstLiveSegment(timeout: 1))
+    }
+
+    @Test("Single-segment opt-in cannot bypass an explicit holdback floor")
+    func singleSegmentRespectsHoldbackFloor() async throws {
+        let (provider, cache) = provider(grace: 0, singleSegmentMinimum: 5, holdbackFloor: true)
+        defer { provider.cancelWaiters(); cache.close() }
+        append(provider, 0)
+        let job = ProbeTestJob { provider.waitForFirstLiveSegment(timeout: 30) }
+        try await waitFor { provider.parkedWaiterCount == 1 }
+        #expect(!(try await waitFor(upTo: .milliseconds(100)) { job.isFinished }))
+        provider.cancelWaiters()
+        #expect(try await !job.outcome().get())
+    }
+
 }

@@ -12,6 +12,8 @@ the public-API contract.
 
 ### Added
 
+- Opt-in `LoadOptions.liveStartupSingleSegmentMinimumSeconds` for long-GOP `.fastZap` sources: admit sufficiently long completed first segments through the existing grace without waiting for another full GOP. Default two-segment admission and live-edge holdback remain unchanged.
+
 - Configurable `.fastZap` startup grace and HTTP VOD opening budgets through `LoadOptions.liveStartupGraceSeconds` and `SourceOpenPolicy`, independent of live-edge holdback.
 - Correlated source-opening diagnostics for first data, request-slot waits and fallback size-probe results.
 - Caller-configurable live DVR retention through `LiveDVRLimits`, with capacity expiry and optional software spool bounds through `SoftwareDVRRetentionOptions`. Resource budgets remain the caller's choice.

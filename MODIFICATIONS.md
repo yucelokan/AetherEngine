@@ -38,6 +38,18 @@ application resource budgets do not belong here.
   their own transport intent. `sessionReloadRefusal` already reports whether a
   custom source can be reopened; a second audio-specific API is unnecessary.
 
+### Live startup admission
+
+`LoadOptions.liveStartupSingleSegmentMinimumSeconds` is an optional threshold for
+single finalized-segment admission on `.fastZap` loopback live sources. Nil
+preserves upstream's two-segment minimum. The caller chooses both this threshold
+and the existing startup grace; neither changes segment cuts or live-edge
+holdback. Policy and first-manifest logs expose the effective admission settings.
+Long-GOP raw TS can otherwise wait an extra full GOP even with zero grace.
+The real-media script in `Scripts/test-long-gop-startup.sh` covers 5/10-second
+H.264 GOPs with B-frames, AAC, paced delivery, AVPlayer clock progression, rewind
+and live return on macOS. Physical iOS/tvOS validation remains a host obligation.
+
 ## Internal corrections
 
 ### Live timeline and source overlap

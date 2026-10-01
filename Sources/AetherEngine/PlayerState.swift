@@ -564,6 +564,17 @@ public struct LoadOptions: Sendable, Equatable {
     /// (AetherEngine#195/#208).
     public var liveJoinProfile: LiveJoinProfile = .standard
 
+    /// Extra wait after two finalized segments for `.fastZap` loopback live joins.
+    /// Nil uses the observed segment duration clamped to 0.5...2 seconds. Zero serves immediately
+    /// once both segments exist. Invalid or negative values use the automatic policy.
+    /// A shorter grace can increase early rebuffering on irregular sources. This does not change
+    /// TARGETDURATION, HOLD-BACK, the two-segment minimum, or `.standard` joins.
+    public var liveStartupGraceSeconds: Double? = nil
+
+    /// HTTP VOD opening budgets. Applied to the initial playback reader and its reopens;
+    /// live, sequential-only sources and disposable frame probes retain their own policies.
+    public var sourceOpenPolicy: SourceOpenPolicy = .init()
+
     /// Cut AVPlayer's stall-avoidance wait short at the live join, once it is holding on media it has
     /// already buffered. Live sessions on the AVPlayer-backed paths only. Default `false` (AE#440).
     ///
@@ -891,6 +902,8 @@ public struct LoadOptions: Sendable, Equatable {
         dvrWindowSeconds: Double? = nil,
         liveBlockingReload: Bool? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
+        liveStartupGraceSeconds: Double? = nil,
+        sourceOpenPolicy: SourceOpenPolicy = .init(),
         liveJoinStartsImmediately: Bool = true,
         clampsLiveResumeToWindow: Bool = true,
         nativeRemoteHLS: Bool = false,
@@ -934,6 +947,8 @@ public struct LoadOptions: Sendable, Equatable {
         self.dvrWindowSeconds = dvrWindowSeconds
         self.liveBlockingReload = liveBlockingReload
         self.liveJoinProfile = liveJoinProfile
+        self.liveStartupGraceSeconds = liveStartupGraceSeconds
+        self.sourceOpenPolicy = sourceOpenPolicy
         self.liveJoinStartsImmediately = liveJoinStartsImmediately
         self.clampsLiveResumeToWindow = clampsLiveResumeToWindow
         self.nativeRemoteHLS = nativeRemoteHLS

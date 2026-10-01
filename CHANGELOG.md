@@ -12,12 +12,16 @@ the public-API contract.
 
 ### Added
 
+- Configurable `.fastZap` startup grace and HTTP VOD opening budgets through `LoadOptions.liveStartupGraceSeconds` and `SourceOpenPolicy`, independent of live-edge holdback.
+- Correlated source-opening diagnostics for first data, request-slot waits and fallback size-probe results.
 - Caller-configurable live DVR retention through `LiveDVRLimits`, with capacity expiry and optional software spool bounds through `SoftwareDVRRetentionOptions`. Resource budgets remain the caller's choice.
 - Measured live target duration and native item-edge accessors, plus a backward-compatible caller-supplied offset for `seekToLiveEdge`.
 - Timestamped, cancellable resident previews and a bounded one-shot still extraction API with measured optional presentation timestamps.
 
 ### Fixed
 
+- Admit subsequent live playlist requests without repeating the first-manifest startup grace; preserve cancellation, holdback and blocking-reload behavior.
+- Serialize fallback file-size probes on single-request origins, share a discovery deadline, and cancel/join losing probes before playback resumes.
 - Keep native live display, seek and subtitle axes consistent across source timestamp rollback; guard queued resume/seek work against newer commands.
 - Recognize exact source-packet replay conservatively before muxing, with bounded history and pending packets; preserve ordinary discontinuity handling when an overlap cannot be confirmed.
 - Apply live retention changes consistently to cache, playlist and producer admission, and recover a software feeder whose retained history was evicted.

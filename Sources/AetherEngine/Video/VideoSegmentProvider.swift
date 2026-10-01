@@ -615,6 +615,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     }
     /// Only `.fastZap` sessions may serve a shallow first window after a bounded grace.
     private let allowsBoundedDegradedStart: Bool
+    private let startupGraceSeconds: TimeInterval?
+    /// Protected by firstSegmentCondition. Successful admission is separate from diagnostic
+    /// accounting: a timed-out empty window must never admit a later request.
+    private var startupAdmitted = false
     /// AE#594 arm B: skip the bounded branch, so the wait ends at the full holdback cushion or at the
     /// outer wall-clock deadline. Measurement arm, off unless the environment asks for it.
     private let boundedStartFloorsAtHoldback: Bool
@@ -840,6 +844,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         liveWindowSizing: LiveWindowSizing = LiveWindowSizing(targetSegmentDurationSeconds: 4.0, dvrWindowSeconds: nil),
         nativeLiveDVRPolicy: LiveDVRRetentionPolicy? = nil,
         allowsBoundedDegradedStart: Bool = false,
+        startupGraceSeconds: TimeInterval? = nil,
         boundedStartFloorsAtHoldback: Bool = false,
         blockingReloadOverride: Bool? = nil,
         liveCadencePolicy: LiveCadencePolicy? = nil,
@@ -871,6 +876,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.baseLiveWindowSizing = liveWindowSizing
         self.nativeLiveDVRPolicy = nativeLiveDVRPolicy
         self.allowsBoundedDegradedStart = allowsBoundedDegradedStart
+        self.startupGraceSeconds = startupGraceSeconds.flatMap {
+            $0.isFinite && $0 >= 0 ? min(120, $0) : nil
+        }
         self.boundedStartFloorsAtHoldback = boundedStartFloorsAtHoldback
         self.blockingReloadOverride = blockingReloadOverride
         self.liveCadencePolicy = liveCadencePolicy
@@ -2430,6 +2438,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         defer { parkedWaiters -= 1 }
         while true {
             if waitersCancelled { return false }
+            if startupAdmitted { return true }
             let snap = liveCushionSnapshot()
             let target = currentLiveTargetDuration(maxSegmentDuration: snap.maxDuration)
             if LiveEdgePolicy.startupCushionSatisfied(segmentCount: snap.count,
@@ -2444,7 +2453,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                !boundedStartFloorsAtHoldback,
                snap.count >= LiveEdgePolicy.minStartupSegments,
                degradedDeadline == nil {
-                let grace = LiveEdgePolicy.fastZapDegradedGraceSeconds(
+                let grace = startupGraceSeconds ?? LiveEdgePolicy.fastZapDegradedGraceSeconds(
                     maxSegmentDuration: snap.maxDuration
                 )
                 degradedGrace = grace
@@ -2512,6 +2521,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         warning: Bool = false,
         note: String? = nil
     ) {
+        startupAdmitted = true
+        firstSegmentCondition.broadcast()
         guard !didAccountForFirstServe else { return }
         didAccountForFirstServe = true
         let account = LiveEdgePolicy.firstServeAccount(

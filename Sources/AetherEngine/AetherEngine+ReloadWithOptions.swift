@@ -395,7 +395,7 @@ enum SessionOptionCorrection {
         "audioBridgeMode", "isLive", "audioOnly",
         "dvrWindowSeconds",
         "softwareDVRRetention",
-        "liveBlockingReload", "liveJoinProfile", "liveJoinStartsImmediately",
+        "liveBlockingReload", "liveJoinProfile", "liveStartupGraceSeconds", "sourceOpenPolicy", "liveJoinStartsImmediately",
         "clampsLiveResumeToWindow", "nativeRemoteHLS", "nativeRemoteHLSIngestFallback",
         "preserveASSMarkup", "prepareNativeSubtitles", "eagerNativeSubtitleReaders", "confirmAtmos",
         "nativeSubtitlePreferredLanguages", "sequentialOrigin", "maxConcurrentSourceRequests", "heldSourceConnection",

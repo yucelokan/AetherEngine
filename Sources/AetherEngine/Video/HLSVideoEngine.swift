@@ -955,6 +955,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         isLiveSession: Bool = false,
         dvrWindowSeconds: Double? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
+        liveStartupGraceSeconds: TimeInterval? = nil,
+        sourceOpenPolicy: SourceOpenPolicy = .init(),
         liveCutTargetSeconds: Double? = nil,
         blockingReloadOverride: Bool? = nil,
         liveCadenceObservation: (@Sendable () -> Double?)? = nil,
@@ -986,6 +988,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             probesize: probesize, maxAnalyzeDuration: maxAnalyzeDuration)
             .withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDurationSeconds)
             .withHeldSourceConnection(heldSourceConnection)
+            .withSourceOpenPolicy(sourceOpenPolicy)
         self.dvModeAvailable = dvModeAvailable
         self.displaySupportsHDR = displaySupportsHDR
         self.keepDvh1TagWithoutDV = keepDvh1TagWithoutDV
@@ -1000,6 +1003,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.isLiveSession = isLiveSession
         self.dvrWindowSeconds = dvrWindowSeconds
         self.liveJoinProfile = liveJoinProfile
+        self.liveStartupGraceSeconds = liveStartupGraceSeconds
         // An explicit cut target keeps precedence for direct callers. Otherwise resolve the profile.
         let resolvedLiveCutTarget = liveCutTargetSeconds
             ?? Self.liveCutTargetSeconds(for: liveJoinProfile)
@@ -1058,6 +1062,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
     /// Controls whether the first live manifest may take the bounded shallow-window path.
     private let liveJoinProfile: LiveJoinProfile
+    private let liveStartupGraceSeconds: TimeInterval?
 
     /// Live segment cut target for this session, resolved from the host's `LiveJoinProfile` (AE#195).
     /// Drives the producer's keyframe cut, `LiveWindowSizing`, and (via the served TARGETDURATION floor)
@@ -1117,6 +1122,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// against the origin that punishes them, half way through and with nothing saying so.
     var restartReopenProfile: DemuxerOpenProfile {
         DemuxerOpenProfile.restartReopen
+            .withSourceOpenPolicy(openProfile.sourceOpenPolicy)
             .withSequentialOrigin(sequentialOrigin, declaredDuration: declaredDurationSeconds)
             .withHeldSourceConnection(heldSourceConnection)
     }
@@ -1984,6 +1990,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             ),
             nativeLiveDVRPolicy: isLiveSession ? nativeLiveDVRPolicy : nil,
             allowsBoundedDegradedStart: liveJoinProfile == .fastZap,
+            startupGraceSeconds: liveStartupGraceSeconds,
             boundedStartFloorsAtHoldback: LiveEdgePolicy.boundedStartFloorArmed,
             blockingReloadOverride: blockingReloadOverride,
             liveCadencePolicy: liveCadencePolicy,

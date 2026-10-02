@@ -1,4 +1,4 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
+// Modified 2026-10-02; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import AVFoundation
 import CoreMedia
@@ -113,8 +113,8 @@ final class SoftwarePlaybackHost {
     var displayLayer: AVSampleBufferDisplayLayer { renderer.displayLayer }
 
     /// SW-PiP Phase C: engine-fed cue mirror + PiP gate for the renderer's frame compositor.
-    func updateSubtitleCompositor(cues: [SubtitleCue], enabled: Bool) {
-        renderer.subtitleCompositor.update(cues: cues, enabled: enabled)
+    func updateSubtitleCompositor(cues: [SubtitleCue], enabled: Bool, delaySeconds: Double = 0) {
+        renderer.subtitleCompositor.update(cues: cues, enabled: enabled, delaySeconds: delaySeconds)
     }
 
     // MARK: - Internals

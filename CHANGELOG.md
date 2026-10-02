@@ -12,6 +12,8 @@ the public-API contract.
 
 ### Added
 
+- `setSoftwareSubtitleDelay(_:)` adjusts subtitle timing in software PiP without reopening media; both subtitle channels use source-frame time. Native AVPlayer renditions remain outside this API's scope.
+
 - `AetherEngine.isSourceSeekable` and `canSeek` expose measured source/session capabilities; forward-only VOD seeks report `sourceNotSeekable`.
 
 - Opt-in `LoadOptions.liveStartupSingleSegmentMinimumSeconds` for long-GOP `.fastZap` sources: admit sufficiently long completed first segments through the existing grace without waiting for another full GOP. Default two-segment admission and live-edge holdback remain unchanged.

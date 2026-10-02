@@ -1082,3 +1082,24 @@ Public for the CLI, the test suite, or a diagnostic overlay, and outside the sha
 - **`DiscInspector` / `DiscInspection`**, `DoviRpuConverter` and its probe, `AudioTapProbe`, `SoftwareDecodeProbeResult`, `A53SEIParser`: repro and inspection surfaces behind `aetherctl` subcommands.
 - **`HLSLiveIngestReader`'s internals** (`terminalError`, `upstreamTargetDuration`, `observedLiveCadenceSeconds`, `closedLiveCadenceSeconds`, `upstreamSegmentDurationSeconds`, `companionAudioReader`): fixture and diagnostic reads. The last two are the closed evidence the served TARGETDURATION is sealed from (AE#447); `upstreamTargetDuration` is the upstream's own claim, reported in the seal line and derived from nowhere.
 - **`SubtitleChannel`**: the primary / secondary selector on the engine's internal subtitle routing. No public signature takes one; a host picks the channel by calling the primary or the secondary method.
+
+### Software PiP subtitle timing
+
+`engine.setSoftwareSubtitleDelay(seconds)` delays software PiP subtitles for
+positive values and advances them for negative values. `softwareSubtitleDelaySeconds`
+reports the preference. Values are media seconds, apply to both subtitle channels,
+survive subsequent loads on the same engine, and are sampled on each composited
+video frame. Non-finite values are ignored. No seek, reload or A/V timestamp change
+is performed.
+
+An inline host overlay observes `engine.clock` directly and selects cues at
+`clock.sourceTime - delay`; `currentTime` is the transport/DVR axis and can differ
+from the rendered picture. Use half-open cue intervals (`start <= time < end`).
+On remote HLS, consult `sourceTimeFollowsPicture` before displaying target cues
+during an unresolved seek. Some remote sessions never measure a picture lead;
+they require an explicit best-available-clock policy during steady playback.
+
+This setting does **not** shift native AVPlayer subtitle renditions. Native PiP,
+AirPlay and AVFoundation-rendered remote renditions retain their original timing.
+The host should make that limitation visible and retain the user's inline setting
+for the return to an adjustable renderer.

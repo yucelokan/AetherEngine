@@ -1,4 +1,4 @@
-// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
+// Modified 2026-10-02; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import AVFoundation
 import Combine
@@ -1929,7 +1929,8 @@ extension AetherEngine {
         Publishers.CombineLatest($subtitleCues, $secondarySubtitleCues)
             .sink { [weak self, weak host] primary, secondary in
                 guard let self, let host else { return }
-                host.updateSubtitleCompositor(cues: primary + secondary, enabled: self.pictureInPictureActive)
+                host.updateSubtitleCompositor(cues: primary + secondary, enabled: self.pictureInPictureActive,
+                                              delaySeconds: self.softwareSubtitleDelaySeconds)
             }
             .store(in: &softwareCancellables)
         // #131: no demuxable CC track on the SW path either: arm an A53 tap fed by decoded-frame

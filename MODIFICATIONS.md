@@ -1,6 +1,6 @@
 # Downstream engine changes
 
-Date: 2026-10-01. Current base: upstream 7.25.1,
+Date: 2026-10-02. Current base: upstream 7.25.1,
 `8f3e73cd4045ff3f4ea09b40b7f1ef3b7f5068e5`.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
@@ -263,3 +263,16 @@ cases in 556 suites (31 optional fixture skips), with zero failures. The
 package, CLI, examples and tests were compiled in
 the preceding focused `swift test` run. The final full run followed the probe
 error-classification correction. It does not establish iOS/tvOS device playback.
+
+## Software subtitle presentation timing
+
+`setSoftwareSubtitleDelay(_:)` applies a caller-supplied timing adjustment to both
+subtitle channels in software PiP. Positive values delay subtitles and negative
+values advance them, in media seconds against the presented frame PTS. The setting
+survives engine loads and PiP transitions, rejects non-finite input, and does not
+reopen the source or change A/V timestamps. Host overlays use the same adjustment
+against `clock.sourceTime` and observe that clock directly.
+
+This API does not change AVPlayer-owned native subtitle renditions (including
+native PiP and AirPlay). Consumers must expose that capability limit instead of
+claiming the native renderer applies an overlay-only timing adjustment.

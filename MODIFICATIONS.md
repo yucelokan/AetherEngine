@@ -1,7 +1,7 @@
 # Downstream engine changes
 
-Date: 2026-10-02. Current base: upstream 7.25.1,
-`8f3e73cd4045ff3f4ea09b40b7f1ef3b7f5068e5`.
+Date: 2026-10-02. Current base: upstream 7.25.2,
+`f5f9a7372b452485f1bb33e1a071b9f927864026`.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM
@@ -276,3 +276,30 @@ against `clock.sourceTime` and observe that clock directly.
 This API does not change AVPlayer-owned native subtitle renditions (including
 native PiP and AirPlay). Consumers must expose that capability limit instead of
 claiming the native renderer applies an overlay-only timing adjustment.
+
+
+## Upstream 7.25.2 integration
+
+The published tag is merged with its ingest segment-duration seal, phase-equalised
+join, readiness-aware native start and per-item audio/video diagnostics. Dependency
+requirements are unchanged. Existing caller-configurable startup admission, live
+retention, VOD source recovery and software subtitle timing APIs remain available.
+
+The two conflicting regions were both in `VideoSegmentProvider`. The fork keeps
+its existing successful-admission latch for ingest and raw sources, including
+cancellation precedence and waking concurrent manifest waiters. The upstream
+join-spent observation is read before the media snapshot, preserving its seal
+ordering. A separate ingest-only latch is unnecessary. The upstream raw-source
+latch test is adapted to this documented downstream contract; the first request
+still pays its grace and subsequent requests do not repeat it. The HLS ingest
+assertions remain unchanged. No live-edge holdback is reduced by this resolution.
+
+Validation on macOS 27.0.1, Xcode 27.0 (27A266a), Swift 6.4: 194 focused
+Aether tests passed (86 XCTest cases and 108 Swift Testing tests), covering all
+seven AE#684 suites plus live admission/cadence/holdback, native readiness, source
+timestamp rollback, seek capability and subtitle composition/channel selection.
+The real AVPlayer fixtures also passed: both 5 s and 10 s GOP raw-TS scenarios
+opened and became seekable in about 3.2–3.4 s, advanced normally, rewound and
+returned to live; both VOD source-recovery/seek and sequential-source scenarios
+passed. These are synthetic macOS measurements, not physical iOS/tvOS or provider
+validation. No application build or application test suite was run.

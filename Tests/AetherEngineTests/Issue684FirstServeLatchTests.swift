@@ -5,10 +5,9 @@
 // holdback, served after its grace) the second one waited out a second grace: measured on a
 // three-segment 6 s upstream as 2.012 s to the first manifest, then 2.02 s more before `init.mp4`.
 //
-// Modified downstream 2026-10-02: successful admission is also latched for raw sources.
-// The fork keeps its existing first-request-only contract instead of reintroducing the
-// second grace. The advertised target duration and holdback remain unchanged; real-media
-// coverage in LongGOPLiveStartupTests verifies playback, rewind and live return.
+// The fork keeps its first-request-only contract on raw sources through an explicit host
+// option. Upstream leaves that arm off by default until a device validates its edge behavior.
+// The advertised target duration and holdback remain unchanged.
 import XCTest
 @testable import AetherEngine
 
@@ -30,6 +29,7 @@ final class Issue684FirstServeLatchTests: XCTestCase {
             isLive: true,
             liveWindowSizing: LiveWindowSizing(targetSegmentDurationSeconds: 0.5, dvrWindowSeconds: nil),
             allowsBoundedDegradedStart: true,
+            firstServeLatchCoversEngineCut: !ingest,
             liveCadencePolicy: policy
         )
         return (provider, cache)

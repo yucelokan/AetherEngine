@@ -12,7 +12,8 @@ struct LiveStartupAdmissionTests {
             hdcpLevel: nil, sourceBitrate: 4_000_000, isLive: true,
             liveWindowSizing: .init(targetSegmentDurationSeconds: 0.5, dvrWindowSeconds: nil),
             allowsBoundedDegradedStart: fast, startupGraceSeconds: grace,
-            singleSegmentStartupMinimumSeconds: singleSegmentMinimum, boundedStartFloorsAtHoldback: holdbackFloor)
+            singleSegmentStartupMinimumSeconds: singleSegmentMinimum, boundedStartFloorsAtHoldback: holdbackFloor,
+            firstServeLatchCoversEngineCut: true)
         return (provider, cache)
     }
 

@@ -17,6 +17,7 @@ the public-API contract.
 - `AetherEngine.isSourceSeekable` and `canSeek` expose measured source/session capabilities; forward-only VOD seeks report `sourceNotSeekable`.
 
 - Opt-in `LoadOptions.liveStartupSingleSegmentMinimumSeconds` for long-GOP `.fastZap` sources: admit sufficiently long completed first segments through the existing grace without waiting for another full GOP. Default two-segment admission and live-edge holdback remain unchanged.
+- `LoadOptions.liveFirstServeLatchCoversEngineCut` lets a host opt into the first-manifest latch on engine-cut live sources without a process-wide environment variable. Default false; ingested HLS already latches.
 
 - Configurable `.fastZap` startup grace and HTTP VOD opening budgets through `LoadOptions.liveStartupGraceSeconds` and `SourceOpenPolicy`, independent of live-edge holdback.
 - Correlated source-opening diagnostics for first data, request-slot waits and fallback size-probe results.
@@ -29,13 +30,43 @@ the public-API contract.
 - Retry an unanswered HTTP VOD data open once within the recovery budget, retaining the successful response body. Exhausted unanswered requests fail as transport errors instead of silently disabling seek or repeating the opening ladder.
 - Reject seeks and ignore saved positions on forward-only VOD. Native seek completion requires success and an actual landing; clock, subtitle anchors and diagnostics use that measured landing.
 
-- Admit subsequent live playlist requests without repeating the first-manifest startup grace; preserve cancellation, holdback and blocking-reload behavior.
+- Admit subsequent live ingest playlist requests without repeating the first-manifest startup grace; allow an explicit opt-in for engine-cut sources while preserving cancellation, holdback and blocking-reload behavior.
 - Serialize fallback file-size probes on single-request origins, share a discovery deadline, and cancel/join losing probes before playback resumes.
 - Keep native live display, seek and subtitle axes consistent across source timestamp rollback; guard queued resume/seek work against newer commands.
 - Recognize exact source-packet replay conservatively before muxing, with bounded history and pending packets; preserve ordinary discontinuity handling when an overlap cannot be confirmed.
 - Apply live retention changes consistently to cache, playlist and producer admission, and recover a software feeder whose retained history was evicted.
 - Serialize/coalesce audio selections, reject stale completion errors and retain the latest transport intent during a rebuild.
 - Avoid probing AV1 hardware capability for unrelated video codecs.
+
+## [7.26.3] - 2026-10-03
+
+### Added
+
+- **A measurement arm for the first-serve latch on engine-cut sources (#686).** On raw MPEG-TS under `.fastZap` a bounded start held AVPlayer's second plain `/media.m3u8` request for a second grace (1.0 to 1.4 s on the reporter's Apple TV). `AETHER_FIRST_SERVE_LATCH_ALL=1` applies #684's latch to those sources too; read once per process, off by default, so default behaviour is unchanged. Both arms now log how long that second request waited (`repeat live manifest request held Xs`), which was silent before. No API change.
+
+## [7.26.2] - 2026-10-03
+
+### Fixed
+
+- **One frame more bought a whole second of `.fastZap` TARGETDURATION (#670 round 2).** The GOP headroom term took `ceil(1.5 x max EXTINF)`, so on a 59.94 fps source with 1.001 s GOPs a 79-frame segment (1.318 s) sealed 2 and an 80-frame one (1.335 s) sealed 3: a 9 s holdback, and a 6 s rebuild backlog then started bounded and presented 2.5 s later. The term now asks what it means, whether a GOP 1.5 x the longest seen would list legally (RFC 8216 rounds EXTINF to the nearest integer) and finish inside AVPlayer's `1.5 x TD` patience with 0.5 s to spare, so segments up to 1.666 s seal 2. Never above the old value; 1 s GOPs keep TARGETDURATION 2. The seal line names what the term needs (`1.5 x max EXTINF 2.002s needs 2s`). No API change.
+
+## [7.26.1] - 2026-10-03
+
+### Fixed
+
+- **A software-path rescue replayed the gap a host `load()` had skipped (#629).** A native VOD item mounted past the head reads, until its mount seek lands, the start of the segment AVPlayer decodes up from (12.00 s under 15.90 s on the reporter's Apple TV), and the session published that reading. Once the host's `load()` had returned nothing else remembered 15.90 s, so an item AVPlayer refused in that window was rebuilt at 12.00 s and the film replayed 3.9 s after the rescue. The clock hold #646 gave the in-place swap now covers that mount as well: the session reads the position it was mounted at until the mount seek lands or the item plays, and the rescue resumes there. No API change.
+
+## [7.26.0] - 2026-10-02
+
+### Added
+
+- **Scrub thumbnails in the stock player (#682).** `LoadOptions.serveIFramePlaylist` makes a native VOD session list an I-frame rendition in its master, which is the one input `AVPlayerViewController` takes thumbnails from: a host that presents the system transport bar gets them, and I-frame fast forward and rewind, without writing any UI. Each entry is the source's own keyframe at full resolution, read by a second reader and stamped on the main rendition's timeline. Off by default. The rendition is left out entirely, never half-served, where the session cannot answer every keyframe (live, MPEG-TS, single-connection origins, discs, media-playlist routing); the log names the reason.
+
+## [7.25.3] - 2026-10-02
+
+### Fixed
+
+- **Engines running side by side each claimed a quarter of the same free space (#687).** A session sizes its disk allowance once, at its start, as `min(2 GiB, a quarter of the tmp volume's free space)`. An allowance another session had claimed but not yet written was still free at that moment, so four engines started together (a multiview host) could claim four quarters: on 4 GiB free, the whole volume. A session is now sized from the free space minus what the other running sessions may still write. One session alone gets exactly what it got; four on 4 GiB free take 2.7 GiB instead of 4, and n sessions always leave at least `(3/4)^n` of the volume. The live window already follows its allowance (#443), so a smaller share means a shorter timeshift depth on the later tiles, and the session log says how much was held back. Covers the native session, the software live ring and the software VOD read-ahead; no API change.
 
 ## [7.25.2] - 2026-10-02
 

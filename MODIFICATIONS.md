@@ -1,7 +1,7 @@
 # Downstream engine changes
 
-Date: 2026-10-02. Current base: upstream 7.25.2,
-`f5f9a7372b452485f1bb33e1a071b9f927864026`.
+Date: 2026-10-04. Current base: upstream 7.26.3,
+`7ac28fa409601d12ec68eeb2e9468a240d5d90cd`.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM
@@ -46,6 +46,11 @@ preserves upstream's two-segment minimum. The caller chooses both this threshold
 and the existing startup grace; neither changes segment cuts or live-edge
 holdback. Policy and first-manifest logs expose the effective admission settings.
 Long-GOP raw TS can otherwise wait an extra full GOP even with zero grace.
+`LoadOptions.liveFirstServeLatchCoversEngineCut` separately lets a host skip a
+second manifest startup grace after successful admission on engine-cut sources.
+Its default is false, matching upstream 7.26.3; HLS ingest latches by default.
+The application chooses whether its validated source and live-edge policy warrant
+this lower-latency path. No process-wide environment setting is required.
 The real-media script in `Scripts/test-long-gop-startup.sh` covers 5/10-second
 H.264 GOPs with B-frames, AAC, paced delivery, AVPlayer clock progression, rewind
 and live return on macOS. Physical iOS/tvOS validation remains a host obligation.

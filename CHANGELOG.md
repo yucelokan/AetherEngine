@@ -38,6 +38,12 @@ the public-API contract.
 - Serialize/coalesce audio selections, reject stale completion errors and retain the latest transport intent during a rebuild.
 - Avoid probing AV1 hardware capability for unrelated video codecs.
 
+## [7.27.1] - 2026-10-04
+
+### Fixed
+
+- **The audio-only path's clock parks at end of media instead of free-running past it (#694).** `AudioPlaybackHost` reported `.ended` while its synchronizer kept rate 1, so `currentTime` grew past `duration` for as long as the session stood. It now gets the AE#374 park the software host has: the queued tail plays out, then the clock stops on the last sample, and `play()` no longer restarts a clock the source stopped. Reported by ijuniorfu.
+
 ## [7.27.0] - 2026-10-04
 
 ### Fixed

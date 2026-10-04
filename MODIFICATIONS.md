@@ -1,7 +1,7 @@
 # Downstream engine changes
 
-Date: 2026-10-04. Current base: upstream 7.26.3,
-`7ac28fa409601d12ec68eeb2e9468a240d5d90cd`.
+Date: 2026-10-04. Current base: upstream 7.27.0,
+`6f427d217001528befaf90b16a4bc20ae43f82c1`.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM

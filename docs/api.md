@@ -680,6 +680,7 @@ suppressing `AVPlayerItemLegibleOutput` to keep the measurement running.
 | Symbol | Notes |
 | --- | --- |
 | `$isLive` | Mirrors `LoadOptions.isLive` for the session. |
+| `$isSequentialOrigin` | True while a VOD session is served as a sequential origin, declared (`LoadOptions.sequentialOrigin`) or found by the reader (the origin ignores `Range`, or refused the ranged open twice and served a plain GET, AE#693). The session plays from the start, so a `startPosition` given to `load()` was not honoured, and a seek lands only inside what `$residentRanges` already holds. A host that needs the position reopens the source or tells the user. Set during `load()`, cleared on stop. |
 | `seekToLiveEdge(offsetSeconds:)` | `async`. Caller-selected distance behind the usable live edge, clamped to retained media. Defaults to zero for existing callers. Invalid or negative offsets become zero; the engine does not choose a host's safety margin. |
 | `liveTargetDurationSeconds` | Optional measured TARGETDURATION of the served loopback HLS playlist. Nil before sealing and on routes without that playlist. A host can use its `3 × TARGETDURATION` holdback when choosing a return-to-live target. |
 | `currentItemLiveEdgeTime` | Optional usable native item edge on the display timeline, from the asynchronous host mirror. A stale mirror may admit already-played contiguous resident history; prefetched history alone cannot advance it. |

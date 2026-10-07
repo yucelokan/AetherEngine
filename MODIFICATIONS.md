@@ -1,7 +1,7 @@
 # Downstream engine changes
 
-Date: 2026-10-05. Current base: upstream 7.27.1,
-`d9a0ce87e72ac90e5b07c96cc85b4f63f5b6bed2`.
+Date: 2026-10-07. Current base: upstream 7.28.3,
+`3cc256a0c1b9d9ec5302fac3f48b3c04cb9ab3e5`.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM
@@ -308,3 +308,39 @@ opened and became seekable in about 3.2–3.4 s, advanced normally, rewound and
 returned to live; both VOD source-recovery/seek and sequential-source scenarios
 passed. These are synthetic macOS measurements, not physical iOS/tvOS or provider
 validation. No application build or application test suite was run.
+
+## Upstream 7.28.3 integration
+
+Includes 7.27.2 through 7.28.3: software audio diagnostics and EOF clock handling,
+HEVC composition-offset repair and parameter-set preservation, partial keyframe
+index validation, opt-in HDR Vivid detection, and H.264/HEVC repair across early
+seeks onto open GOPs. The first-serve latch now defaults on for engine-cut live
+sources upstream. The existing explicit downstream enable remains compatible;
+startup admission thresholds and retention policies still belong to the caller.
+
+The live-provider conflict keeps the caller-policy diagnostic and the upstream
+latch semantics. The reload test uses upstream's state-observer synchronization,
+which supersedes the earlier downstream controlled-reader fixture. No dependency
+requirements or deployment targets are changed by this integration.
+
+
+Validation on Apple M1 Pro, macOS 27.0.1 (26A434), Xcode 27.0 (27A266a),
+Swift 6.4:
+
+- `swift build --jobs 4` passed (library, CLI and compiled examples).
+- `swift test --jobs 2` passed: 735 engine XCTest cases (one skipped),
+  17 SMB XCTest cases, and the 4,137-case Swift Testing run. Optional external
+  fixtures remain opt-in and are reported as skipped by the test runner.
+- `Scripts/test-long-gop-startup.sh` passed both real AVPlayer cases: synthetic
+  H.264/AAC MPEG-TS with 5 s and 10 s GOPs; first picture and usable seek range
+  at about 3.28 s and 3.19 s, followed by rewind and return-to-live playback.
+- `Scripts/test-vod-open-seek.sh` passed both real AVPlayer cases: synthetic
+  H.264/AAC/SubRip MKV, bounded no-response recovery, forward/backward/paused
+  seeking, and honest rejection of seeking on a sequential source.
+- Source-recovery tests now use dedicated blocking-I/O workers and semantic
+  request/cancellation assertions instead of scheduler-sensitive latency ceilings.
+  Idle retention checks use the shared cancellable waiting helper; disposable
+  snapshot fixtures are created in the temporary directory.
+
+These checks cover the integrated fork revision. The focused upstream branches
+have their own commit-level build and regression results in their PR test plans.

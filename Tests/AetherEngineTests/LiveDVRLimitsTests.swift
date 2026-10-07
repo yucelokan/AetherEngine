@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import AetherEngine
 
-@Suite("Live DVR resource contract")
+@Suite("Live DVR resource contract", .timeLimit(.minutes(1)))
 struct LiveDVRLimitsTests {
     private final class Clock: @unchecked Sendable {
         private let lock = NSLock()
@@ -214,18 +214,18 @@ struct LiveDVRLimitsTests {
     }
 
     @Test("the production expiry timer reclaims idle paused history without source or consumer progress")
-    func independentIdleExpiry() {
+    func independentIdleExpiry() async throws {
         let clock = Clock()
         let policy = LiveDVRRetentionPolicy(now: { clock.now })
         policy.update(LiveDVRLimits(windowSeconds: 2700, maximumBytes: 32 * 1024 * 1024,
                                          minimumFreeBytes: 128 * 1024 * 1024, capacityValidUntil: 3),
                       availableBytes: 1024 * 1024 * 1024, residentBytes: 0)
-        let expired = DispatchSemaphore(value: 0)
+        let expired = ProbeTestBox(false)
         let cache = SegmentCache(forwardWindow: 1, backwardWindow: 1, nativeLiveDVRPolicy: policy,
                                  onResidentSetChanged: {
                                      let instant = clock.now
                                      if instant > 3 && instant < 4 {
-                                         expired.signal()
+                                         expired.update { $0 = true }
                                      }
                                  })
         defer { cache.close() }
@@ -236,7 +236,7 @@ struct LiveDVRLimitsTests {
         clock.advance(3 + 0.001)
         // Only the actual DispatchSource callback can fulfill this observer. No direct prune,
         // headroom check, segment append or playlist build is made after expiry.
-        #expect(expired.wait(timeout: .now() + .seconds(5)) == .success)
+        try await waitFor { expired.value }
         #expect(cache.count == LiveWindowSizing.minSafeSegments)
         clock.advance(10) // exclude the ordinary close resident-set notification from the expectation
         cache.close()

@@ -1,4 +1,4 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
+import Combine
 import Foundation
 import Testing
 @testable import AetherEngine
@@ -172,30 +172,31 @@ struct Issue464RebuildCallSiteTransportTests {
 
     @Test("a rebuild stacked behind that audio switch reads the paused transport, not the mount flag")
     func stackedRebuildReadsThePausedTransport() async throws {
-        let holdReloadRead = ProbeTestBox(false)
-        let reloadRead = ProbeTestGate()
-        let reader = ProbeRecordingReader(data: try ProbeTestFixtures.hdr10Plus(), afterRead: {
-            if holdReloadRead.value { reloadRead.wait() }
-        })
         let engine = try AetherEngine()
-        defer { reloadRead.open(); engine.stop() }
-        _ = try await engine.load(source: .custom(reader, formatHint: "mp4"))
+        defer { engine.stop() }
+        _ = try await engine.load(source: Self.customSource())
         engine.pause()
         let url = try #require(engine.loadedURL)
 
-        // A memory-backed reopen can enter and leave .loading between waitFor's
-        // polls. Hold its I/O until the test has observed the actual parked intent.
-        holdReloadRead.update { $0 = true }
-        let rebuild = Task { @MainActor in
-            await engine.reloadWithAudioOverride(
-                url: url, audioStreamIndex: nil, expectedGeneration: engine.loadGeneration)
+        // Stack the read behind the rebuild instead of polling for `.loading`: a custom-source
+        // rebuild can enter and leave `.loading` between two polls, and the poll then waits for a
+        // state that is already gone until `.timeLimit` ends the run (red CI on 2026-10-05 and
+        // 2026-10-06). A main-actor job enqueued as `.loading` is published runs at the rebuild's
+        // first suspension, which is exactly where a second rebuild raised behind it would read.
+        var stacked: Task<(PlaybackState, Bool), Never>?
+        let observer = engine.$state.sink { next in
+            MainActor.assumeIsolated {
+                guard stacked == nil, next == .loading else { return }
+                stacked = Task { @MainActor in (engine.state, engine.sessionRebuildResumesPlaying) }
+            }
         }
-        try await waitFor { reloadRead.entered && engine.state == .loading }
-        #expect(!engine.sessionRebuildResumesPlaying)
-        reloadRead.open()
-        let failure = await rebuild.value
-        #expect(failure == nil)
-        #expect(engine.state != .playing)
+        defer { observer.cancel() }
+
+        _ = await engine.reloadWithAudioOverride(
+            url: url, audioStreamIndex: nil, expectedGeneration: engine.loadGeneration)
+        let (stateThen, resumes) = try #require(await stacked?.value)
+        #expect(stateThen == .loading)
+        #expect(!resumes)
     }
 
     @Test("a mount with autoplay off stays paused across a custom-source reload")

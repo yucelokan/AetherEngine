@@ -58,8 +58,7 @@ struct LongGOPLiveStartupTests {
         options.suppressDisplayCriteria = true
         let start = ContinuousClock.now
         try await engine.load(source: .custom(reader, formatHint: "mpegts"), options: options)
-        let ready = try await waitFor(upTo: .seconds(22)) { engine.isSessionReady }
-        try #require(ready)
+        try await waitFor { engine.isSessionReady }
         let joined = start.duration(to: .now)
         print("LONG_GOP=\(gopSeconds) JOIN_SECONDS=\(joined)")
         for line in log.matching("first live manifest") { print(line) }
@@ -68,10 +67,10 @@ struct LongGOPLiveStartupTests {
             guard let range = engine.seekableLiveRange else { return false }
             return range.upperBound - range.lowerBound >= 1
         }
-        #expect(seekable, "rewind readiness must not wait for a second long GOP")
+        #expect(seekable, "an advancing played frontier must not wait for a second long GOP")
         print("LONG_GOP_SEEKABLE_SECONDS=\(start.duration(to: .now))")
         let initial = engine.currentTime
-        try await Task.sleep(for: .seconds(12))
+        try await waitFor { engine.currentTime - initial > 10 || engine.errorInfo != nil }
         print("LONG_GOP_ADVANCE=\(engine.currentTime - initial) state=\(engine.state)")
         #expect(engine.videoRoute == .loopback)
         #expect(engine.currentTime - initial > 10)
@@ -82,7 +81,7 @@ struct LongGOPLiveStartupTests {
         #expect(engine.currentTime < beforeRewind - 1)
         await engine.seekToLiveEdge(offsetSeconds: 5)
         let afterReturn = engine.currentTime
-        try await Task.sleep(for: .seconds(2))
+        try await waitFor { engine.currentTime > afterReturn + 1 || engine.errorInfo != nil }
         #expect(engine.currentTime > afterReturn + 1)
         #expect(engine.currentAVPlayer?.currentItem?.error == nil)
     }

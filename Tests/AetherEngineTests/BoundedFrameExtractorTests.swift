@@ -8,7 +8,7 @@ import Testing
 struct BoundedFrameExtractorTests {
     @Test("Input and deadline budgets cover open before decode", .timeLimit(.minutes(1)))
     func openIsBudgeted() async throws {
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(".bounded-frame-\(UUID().uuidString).mp4")
         try ProbeTestFixtures.hdr10Plus().write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
@@ -34,7 +34,7 @@ struct BoundedFrameExtractorTests {
 
     @Test("A decoded still returns its measured presentation timestamp", .timeLimit(.minutes(1)))
     func measuredPTS() async throws {
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(".bounded-frame-\(UUID().uuidString).mp4")
         try ProbeTestFixtures.hdr10Plus().write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }

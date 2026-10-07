@@ -581,10 +581,10 @@ public struct LoadOptions: Sendable, Equatable {
     /// this latency/resilience tradeoff; invalid values preserve the two-segment minimum.
     public var liveStartupSingleSegmentMinimumSeconds: Double? = nil
 
-    /// Opt in to latching the first served manifest for engine-cut live sources.
-    /// Later plain playlist requests then skip the startup grace, joining closer to
-    /// the producing edge. Ingested HLS already latches independently. Default false;
-    /// hosts should enable this only after validating their live-edge behavior.
+    /// Explicitly enable the first-serve latch for engine-cut live sources.
+    /// False defers to LiveEdgePolicy's process-wide setting, enabled by default
+    /// since upstream 7.28.2. True also enables it when that setting is disabled.
+    /// Ingested HLS latches independently. This never changes advertised holdback.
     public var liveFirstServeLatchCoversEngineCut: Bool = false
 
     /// HTTP VOD opening budgets. Applied to the initial playback reader and its reopens;
@@ -1059,6 +1059,14 @@ public struct SourceProbe: Sendable {
     /// Separate from `videoFormat == .hdr10Plus` because a Dolby Vision source can carry an HDR10+ layer too
     /// (Blu-ray Profile 7 and the 8.1 remuxes of it), and that source keeps reading `.dolbyVision`.
     public internal(set) var carriesHDR10PlusMetadata: Bool
+    /// HDR Vivid (CUVA T/UWA 005.1) dynamic metadata was SEEN in this source's HEVC video (#699).
+    ///
+    /// Same contract as `carriesHDR10PlusMetadata`: always `false` unless the probe was asked for
+    /// `.hdrVivid`, and `false` never means "proven absent". `videoFormat` does not move: HDR Vivid rides
+    /// an HLG or PQ base layer, the display is switched for that base, and the label keeps saying
+    /// `.hlg` / `.hdr10`. Apple platforms do not apply the dynamic metadata; the flag exists so a host can
+    /// label the source.
+    public internal(set) var carriesHDRVividMetadata: Bool
     /// Settable inside the module so `probeDetectingAtmos` can enrich one track without rebuilding the struct field by field.
     public internal(set) var audioTracks: [TrackInfo]
     /// Includes both text and bitmap (PGS / DVB) variants.
@@ -1079,6 +1087,7 @@ public struct SourceProbe: Sendable {
         isDolbyVision: Bool,
         dvProfile: Int? = nil,
         carriesHDR10PlusMetadata: Bool = false,
+        carriesHDRVividMetadata: Bool = false,
         audioTracks: [TrackInfo],
         subtitleTracks: [TrackInfo],
         metadata: MediaMetadata = MediaMetadata(title: nil, artist: nil, album: nil, artworkData: nil),
@@ -1097,6 +1106,7 @@ public struct SourceProbe: Sendable {
         self.isDolbyVision = isDolbyVision
         self.dvProfile = dvProfile
         self.carriesHDR10PlusMetadata = carriesHDR10PlusMetadata
+        self.carriesHDRVividMetadata = carriesHDRVividMetadata
         self.audioTracks = audioTracks
         self.subtitleTracks = subtitleTracks
         self.metadata = metadata

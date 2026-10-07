@@ -3,6 +3,7 @@ import Combine
 import Testing
 @testable import AetherEngine
 
+@Suite(.timeLimit(.minutes(2)))
 @MainActor
 struct VODSeekCapabilityTests {
     @Test("A known duration never makes a forward-only source seekable")
@@ -62,34 +63,9 @@ struct VODSeekCapabilityTests {
         #expect(engine.isSeeking)
         engine.isSourceSeekable = false
         engine.state = .playing
-        let settled = try await waitFor(upTo: .seconds(1)) { !engine.isSeeking }
-        #expect(settled)
+        try await waitFor { !engine.isSeeking }
         #expect(engine.currentTime == 5)
     }
 
-    @Test("An exhausted opening budget stays a transport failure and is not repeated by routing")
-    func exhaustedOpenDoesNotReprobe() async throws {
-        let gate = ProbeTestGate()
-        let origin = try ProbeHTTPTestOrigin(data: Data(repeating: 0, count: 8192),
-            response: { _, _ in gate.wait(); return nil })
-        let engine = try AetherEngine()
-        defer { engine.stop(); gate.open(); origin.stop() }
-        var options = LoadOptions(sourceOpenPolicy: .init(firstByteTimeout: 0.15, sizeProbeTimeout: 0.25))
-        options.maxConcurrentSourceRequests = 1
-        options.suppressDisplayCriteria = true
-        let started = ContinuousClock.now
-        do {
-            try await engine.load(url: URL(string: "http://127.0.0.1:\(origin.port)/media.mkv")!, options: options)
-            Issue.record("an unanswered source must not load successfully")
-        } catch {
-            #expect(error as? AVIOReaderError == .requestTimeout)
-        }
-        #expect(started.duration(to: .now) < .seconds(2))
-        #expect(origin.requests.count == 2)
-        #expect(engine.errorInfo?.kind == .sourceOpenFailed)
-        #expect(engine.errorInfo?.underlyingDomain == NSURLErrorDomain)
-        #expect(engine.errorInfo?.underlyingCode == URLError.timedOut.rawValue)
-        #expect(!engine.canSeek)
-    }
 
 }

@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import CoreGraphics
 
@@ -30,11 +29,15 @@ extension AetherEngine {
         // Freeze both axes. VOD segment indices use the plan's keyframe origin;
         // the segment's bytes retain their own epoch normalization after restart.
         let origin = sourcePresentationOrigin
+        let live = isLive
+        // Live: the same stable session-to-output shift `liveScrubThumbnail` uses (#712), frozen
+        // here so the request and its result convert on one axis even if the shift moves meanwhile.
+        let liveShift = liveSessionShiftSeconds
         let sourceTarget = PresentationAxis.source(displayTime: seconds, origin: origin)
-        let output = isLive ? seconds - liveSessionShiftSeconds
+        let output = live ? seconds - liveShift
             : sourceTarget - session.firstKeyframeSeconds
         let planOrigin = session.firstKeyframeSeconds - origin
-        let source = await Task.detached(priority: .utility) { [session] in
+        let source = await BlockingWork.detached(priority: .utility) { [session] in
             session.scrubThumbnailSource(atSeconds: output)
         }.value
         guard let source, let carried = source.carriedOffset,
@@ -56,18 +59,18 @@ extension AetherEngine {
             scrubThumbnailExtractors.append((source.segmentIndex, extractor))
             trimScrubThumbnailExtractors()
         }
-        guard let frame = await extractor.residentPreview(rawTarget: isLive ? output : sourceTarget - carried,
+        guard let frame = await extractor.residentPreview(rawTarget: live ? output : sourceTarget - carried,
                     refined: refined, maxWidth: maxWidth, isCancelled: isCancelled),
               gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
-        let stillOwned = await Task.detached(priority: .utility) { [session] in
+        let stillOwned = await BlockingWork.detached(priority: .utility) { [session] in
             guard let current = session.scrubThumbnailSource(atSeconds: output) else { return false }
             return current.identity == source.identity && current.carriedOffset == source.carriedOffset
         }.value
         guard stillOwned, gen == loadGeneration, !Task.isCancelled, !isCancelled() else { return nil }
-        guard let actual = isLive ? Optional(seconds + frame.actualSeconds - output)
+        guard let actual = live ? Optional(frame.actualSeconds + liveShift)
             : ScrubSegmentTime.displayTime(rawPTS: frame.actualSeconds, carriedOffset: carried, displayOrigin: origin)
         else { return nil }
-        let rangeStart = isLive ? seconds + source.startSeconds - output : source.startSeconds + planOrigin
+        let rangeStart = live ? source.startSeconds + liveShift : source.startSeconds + planOrigin
         return ScrubFrame(image: frame.image, actualSeconds: actual, refined: frame.refined,
                          validRange: rangeStart..<(rangeStart + source.durationSeconds))
     }
@@ -106,7 +109,7 @@ extension AetherEngine {
             return loadGeneration == gen ? image : nil
         }
         let gen = loadGeneration
-        let source = await Task.detached(priority: .userInitiated) { [session] in
+        let source = await BlockingWork.detached(priority: .userInitiated) { [session] in
             session.scrubThumbnailSource(atSeconds: seconds)
         }.value
         // Guard against zap/stop clearing the LRU: a stale extractor's segment indices

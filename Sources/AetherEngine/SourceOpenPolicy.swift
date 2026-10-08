@@ -1,4 +1,3 @@
-// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 /// HTTP VOD startup policy. These budgets bound the initial data wait and the entire fallback

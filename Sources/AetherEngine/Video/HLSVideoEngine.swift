@@ -1,4 +1,3 @@
-// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import AVFoundation
 import Foundation
 import AetherLibavformat
@@ -791,6 +790,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// what actually replaces the segments and the item holding them.
     public var audioDelaySeconds: Double = 0
 
+    /// `LoadOptions.progressiveSegmentDelivery`, handed to the provider and to every producer this
+    /// session builds. Set before `start()`.
+    var servesSegmentsProgressively = false
+
     /// Serializes restart requests among themselves. Held across waits (unlike `restartLock`);
     /// only other restarts contend on it.
     private let restartGate = NSLock()
@@ -974,10 +977,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
         isLiveSession: Bool = false,
         dvrWindowSeconds: Double? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
+        sourceOpenPolicy: SourceOpenPolicy = .init(),
         liveStartupGraceSeconds: TimeInterval? = nil,
         liveStartupSingleSegmentMinimumSeconds: TimeInterval? = nil,
-        liveFirstServeLatchCoversEngineCut: Bool = false,
-        sourceOpenPolicy: SourceOpenPolicy = .init(),
         liveCutTargetSeconds: Double? = nil,
         blockingReloadOverride: Bool? = nil,
         liveCadenceObservation: (@Sendable () -> Double?)? = nil,
@@ -1028,7 +1030,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
         self.liveJoinProfile = liveJoinProfile
         self.liveStartupGraceSeconds = liveStartupGraceSeconds
         self.liveStartupSingleSegmentMinimumSeconds = liveStartupSingleSegmentMinimumSeconds
-        self.liveFirstServeLatchCoversEngineCut = liveFirstServeLatchCoversEngineCut
         // An explicit cut target keeps precedence for direct callers. Otherwise resolve the profile.
         let resolvedLiveCutTarget = liveCutTargetSeconds
             ?? Self.liveCutTargetSeconds(for: liveJoinProfile)
@@ -1093,7 +1094,6 @@ public final class HLSVideoEngine: @unchecked Sendable {
     private let liveJoinProfile: LiveJoinProfile
     private let liveStartupGraceSeconds: TimeInterval?
     private let liveStartupSingleSegmentMinimumSeconds: TimeInterval?
-    private let liveFirstServeLatchCoversEngineCut: Bool
 
     /// Live segment cut target for this session, resolved from the host's `LiveJoinProfile` (AE#195).
     /// Drives the producer's keyframe cut, `LiveWindowSizing`, and (via the served TARGETDURATION floor)
@@ -2015,6 +2015,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sourceBitrate: sourceBitrate,
             audioLanguage: servedAudioLanguage,
             isLive: isLiveSession,
+            servesSegmentsProgressively: servesSegmentsProgressively,
             // Sequential archives: playlist grows with the producer's REAL cut durations. The
             // static plan's uniform EXTINF lies whenever the archive's GOP cadence does not
             // divide the cut target (1.92 s GOPs vs a 4.0 s plan put every segment's media up
@@ -2033,7 +2034,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             startupGraceSeconds: liveStartupGraceSeconds,
             singleSegmentStartupMinimumSeconds: liveStartupSingleSegmentMinimumSeconds,
             boundedStartFloorsAtHoldback: LiveEdgePolicy.boundedStartFloorArmed,
-            firstServeLatchCoversEngineCut: liveFirstServeLatchCoversEngineCut || LiveEdgePolicy.firstServeLatchAllArmed,
+            firstServeLatchCoversEngineCut: LiveEdgePolicy.firstServeLatchAllArmed,
             blockingReloadOverride: blockingReloadOverride,
             liveCadencePolicy: liveCadencePolicy,
             restartHandler: isLiveSession ? nil : { [weak self] idx in
@@ -2680,7 +2681,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
 
         // Detached cleanup: producer waitForFinish must precede demuxer/cache/server close
         // (pump accesses them during unwind). ownedParams released last (pump read them).
-        Task.detached {
+        BlockingWork.detached {
             iFrames?.shutdown()
             _ = p?.waitForFinish(timeout: 3.0)
             s?.stop()
@@ -2881,6 +2882,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // AE#464: read here rather than pushed, so every producer this session builds (seek
             // restart, live reopen, #99 revive) cuts with the offset currently in force.
             audioDelaySeconds: audioDelaySeconds,
+            servesSegmentsProgressively: servesSegmentsProgressively,
             epoch: producerEpoch
         )
         // #240: threaded onto every producer (initial + restart), like the wedge-detector providers

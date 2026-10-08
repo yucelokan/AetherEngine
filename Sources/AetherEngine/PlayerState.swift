@@ -1,4 +1,3 @@
-// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import CoreGraphics
 
@@ -564,6 +563,10 @@ public struct LoadOptions: Sendable, Equatable {
     /// (AetherEngine#195/#208).
     public var liveJoinProfile: LiveJoinProfile = .standard
 
+    /// HTTP VOD opening budgets. Applied to the initial playback reader and its reopens;
+    /// live, sequential-only sources and disposable frame probes retain their own policies.
+    public var sourceOpenPolicy: SourceOpenPolicy = .init()
+
     /// Extra wait after an eligible finalized window for `.fastZap` loopback live joins.
     /// Nil uses the observed segment duration clamped to 0.5...2 seconds. Zero serves immediately
     /// once the minimum media exists. Invalid or negative values use the automatic policy.
@@ -580,16 +583,6 @@ public struct LoadOptions: Sendable, Equatable {
     /// A shallow initial playlist can rebuffer if the next segment arrives late. Hosts choose
     /// this latency/resilience tradeoff; invalid values preserve the two-segment minimum.
     public var liveStartupSingleSegmentMinimumSeconds: Double? = nil
-
-    /// Explicitly enable the first-serve latch for engine-cut live sources.
-    /// False defers to LiveEdgePolicy's process-wide setting, enabled by default
-    /// since upstream 7.28.2. True also enables it when that setting is disabled.
-    /// Ingested HLS latches independently. This never changes advertised holdback.
-    public var liveFirstServeLatchCoversEngineCut: Bool = false
-
-    /// HTTP VOD opening budgets. Applied to the initial playback reader and its reopens;
-    /// live, sequential-only sources and disposable frame probes retain their own policies.
-    public var sourceOpenPolicy: SourceOpenPolicy = .init()
 
     /// Cut AVPlayer's stall-avoidance wait short at the live join, once it is holding on media it has
     /// already buffered. Live sessions on the AVPlayer-backed paths only. Default `false` (AE#440).
@@ -818,6 +811,16 @@ public struct LoadOptions: Sendable, Equatable {
     /// remote server directly.
     public var forwardBufferSegments: Int?
 
+    /// Serve each VOD loopback segment while it is being written instead of after its cut. The
+    /// muxer flushes a fragment about every half second and the loopback server sends each one as
+    /// it lands, so AVPlayer can show and start on the first fragments of a segment rather than
+    /// waiting for all of it. On a fast or local source a segment is cut long before AVPlayer asks
+    /// for it and nothing changes; on a slow link it is the difference between waiting for a whole
+    /// segment (seconds of a long GOP at the link's rate) and waiting for its first fragment.
+    /// Default false. VOD only: live keeps its own window and blocking-reload contracts. Ignored for
+    /// `nativeRemoteHLS` and on the software path, which serve no loopback segments.
+    public var progressiveSegmentDelivery: Bool = false
+
     /// Autostart at load completion. Default `true`: every load path ends in `host.play()` and a
     /// `.playing` state (current behavior, byte-identical). Set `false` to mount PAUSED: a host that
     /// holds a pause at mount (synchronized-start lobby that loads several devices and starts them on
@@ -924,10 +927,9 @@ public struct LoadOptions: Sendable, Equatable {
         dvrWindowSeconds: Double? = nil,
         liveBlockingReload: Bool? = nil,
         liveJoinProfile: LiveJoinProfile = .standard,
+        sourceOpenPolicy: SourceOpenPolicy = .init(),
         liveStartupGraceSeconds: Double? = nil,
         liveStartupSingleSegmentMinimumSeconds: Double? = nil,
-        liveFirstServeLatchCoversEngineCut: Bool = false,
-        sourceOpenPolicy: SourceOpenPolicy = .init(),
         liveJoinStartsImmediately: Bool = true,
         clampsLiveResumeToWindow: Bool = true,
         nativeRemoteHLS: Bool = false,
@@ -948,6 +950,7 @@ public struct LoadOptions: Sendable, Equatable {
         preferredSubtitleLanguages: [String] = [],
         externalSubtitles: [ExternalSubtitleTrack] = [],
         forwardBufferSegments: Int? = nil,
+        progressiveSegmentDelivery: Bool = false,
         autoplay: Bool = true,
         teletextPage: Int? = nil,
         audioDelaySeconds: Double = 0,
@@ -973,10 +976,9 @@ public struct LoadOptions: Sendable, Equatable {
         self.dvrWindowSeconds = dvrWindowSeconds
         self.liveBlockingReload = liveBlockingReload
         self.liveJoinProfile = liveJoinProfile
+        self.sourceOpenPolicy = sourceOpenPolicy
         self.liveStartupGraceSeconds = liveStartupGraceSeconds
         self.liveStartupSingleSegmentMinimumSeconds = liveStartupSingleSegmentMinimumSeconds
-        self.liveFirstServeLatchCoversEngineCut = liveFirstServeLatchCoversEngineCut
-        self.sourceOpenPolicy = sourceOpenPolicy
         self.liveJoinStartsImmediately = liveJoinStartsImmediately
         self.clampsLiveResumeToWindow = clampsLiveResumeToWindow
         self.nativeRemoteHLS = nativeRemoteHLS
@@ -997,6 +999,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.preferredSubtitleLanguages = preferredSubtitleLanguages
         self.externalSubtitles = externalSubtitles
         self.forwardBufferSegments = forwardBufferSegments
+        self.progressiveSegmentDelivery = progressiveSegmentDelivery
         self.autoplay = autoplay
         self.teletextPage = teletextPage
         self.audioDelaySeconds = audioDelaySeconds

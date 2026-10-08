@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 /// The accounting seam is below disc recognition/adaptation, so sparse reads and rereads count too.

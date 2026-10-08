@@ -1,7 +1,13 @@
 # Downstream engine changes
 
-Date: 2026-10-07. Current base: upstream 7.28.3,
-`3cc256a0c1b9d9ec5302fac3f48b3c04cb9ab3e5`.
+Date: 2026-10-08. Current base: upstream 7.32.0,
+`4b317b783a81751c36579a4af138cff32ae1c986`.
+
+The current runtime source, package manifest, tests, scripts and engine
+documentation match the upstream 7.32.0 release. All ten downstream contribution
+PRs (#708–#717) are merged upstream and included in this release. The fork now
+retains only this historical modification record and the incorporated GPL text;
+the entries below describe prior revisions.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM
@@ -344,3 +350,37 @@ Swift 6.4:
 
 These checks cover the integrated fork revision. The focused upstream branches
 have their own commit-level build and regression results in their PR test plans.
+
+
+## Upstream 7.32.0 integration
+
+The published release tag, rather than unreleased main, is the integration base.
+Upstream includes the original contributions with the shared live/retention and
+preview/cancellation integration fixes, plus serialized rebuild transport, held
+pictures across audio switches, blocking work off the cooperative pool, HEVC
+registration handling, optional progressive VOD segment delivery and explicit
+segment-storage exhaustion reporting.
+
+Conflicts were resolved to the release implementation after comparing the fork's
+capabilities with the merged contributions. No duplicate downstream runtime patch
+is retained. The former liveFirstServeLatchCoversEngineCut host override and
+wireCommonHostSinks access widening are dropped; WUW uses the upstream latch
+behavior and public contracts. Dependency ranges and deployment targets are
+unchanged.
+
+
+Validation on Apple M1 Pro, macOS 27.0.1, Xcode 27.0, Swift 6.4:
+
+- `swift build --jobs 4` passed.
+- `swift test --jobs 4` passed: 736 engine XCTest cases (one skipped),
+  17 SMB XCTest cases and the 4,178-case Swift Testing run.
+- Both long-GOP AVPlayer live cases passed (H.264/AAC MPEG-TS, 5 s and 10 s GOPs):
+  picture and seekability at about 3.26 s / 3.18 s, then rewind and safe live return.
+- Both AVPlayer VOD opening/seek cases passed (H.264/AAC/SubRip MKV): bounded
+  no-response recovery, forward/backward/paused seeks, and sequential-source rejection.
+- Consuming PlaybackKit: 191 XCTest cases, one skipped, no failures; the library
+  and its Aether dependency also built for the tvOS 27 Simulator SDK.
+- Consumer migration removes the obsolete first-serve override, uses the release's
+  LoadOptions argument order, and handles storageExhausted without compatibility
+  fallback. Consumer test fixtures publish SDK readiness directly rather than
+  widening the engine's private host-sink helper.

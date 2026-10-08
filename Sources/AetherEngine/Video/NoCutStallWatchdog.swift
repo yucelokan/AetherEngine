@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 /// AE#406: the live no-cut stall decision, held off the read thread it judges.

@@ -13,9 +13,8 @@ struct SourceOpenPolicyTests {
 
     @Test func policiesSurviveProfileCopiesAndReopens() {
         let policy = SourceOpenPolicy(firstByteTimeout: 5, sizeProbeTimeout: 8)
-        let options = LoadOptions(liveStartupGraceSeconds: 0, sourceOpenPolicy: policy)
+        let options = LoadOptions(sourceOpenPolicy: policy)
         #expect(options.sourceOpenPolicy == policy)
-        #expect(options.liveStartupGraceSeconds == 0)
         let profile = DemuxerOpenProfile.playback.withSourceOpenPolicy(policy)
             .withHeldSourceConnection(true).withProbeBudget(probesize: 100, maxAnalyzeDuration: 100)
         #expect(profile.sourceOpenPolicy == policy)

@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 // Sources/AetherEngine/Video/LiveWindow.swift
 import Foundation
 

@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 /// Caller-selected retention limits for native loopback and opted-in software live DVR.
@@ -24,7 +23,7 @@ public struct LiveDVRLimits: Equatable, Sendable {
         guard windowSeconds != nil, let availableBytes, availableBytes >= minimumFreeBytes else { return 0 }
         let freeHeadroom = min(maximumBytes, availableBytes - minimumFreeBytes)
         let reclaimable = min(maximumBytes - freeHeadroom, Int64(max(0, residentBytes)))
-        // Preserve upstream's quarter-volume allowance. Add only bounded reclaimable payload,
+        // Preserve the existing quarter-volume allowance. Add only bounded reclaimable payload,
         // rather than a shrinking free-only cap that would evict its own cache repeatedly.
         let quarterAllowance = min(maximumBytes, availableBytes / 4 + min(maximumBytes, Int64(max(0, residentBytes))) / 4)
         return Int(min(freeHeadroom + reclaimable, quarterAllowance))
@@ -59,7 +58,7 @@ final class LiveDVRRetentionPolicy: @unchecked Sendable {
     var snapshot: Snapshot? {
         let instant = now()
         lock.lock(); defer { lock.unlock() }
-        guard let value else { return nil } // unconfigured upstream behavior stays unchanged
+        guard let value else { return nil } // unconfigured behavior stays unchanged
         guard instant.isFinite, instant <= validUntil else {
             return Snapshot(windowSeconds: nil, retentionBytes: 0)
         }

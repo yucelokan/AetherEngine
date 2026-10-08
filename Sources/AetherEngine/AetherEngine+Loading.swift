@@ -1,4 +1,3 @@
-// Modified 2026-10-02; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import AVFoundation
 import Combine
@@ -189,7 +188,7 @@ extension AetherEngine {
     /// `videoReadyForDisplay` is the host's raw layer level (#315); nil on the audio hosts, which
     /// have nothing to display. It is folded, never mirrored: the engine's published flag is latched
     /// for the load, so the seams that reuse a host and briefly lose the picture do not surface.
-    func wireCommonHostSinks(
+    private func wireCommonHostSinks(
         duration: Published<Double>.Publisher,
         isReady: Published<Bool>.Publisher,
         settlePausedAtReadiness: Bool = true,
@@ -844,10 +843,9 @@ extension AetherEngine {
             // AE#195/#208: the session resolves the cut target and enables the bounded first-manifest
             // path only for the host's explicit fastZap profile.
             liveJoinProfile: loadedOptions.liveJoinProfile,
+            sourceOpenPolicy: loadedOptions.sourceOpenPolicy,
             liveStartupGraceSeconds: loadedOptions.liveStartupGraceSeconds,
             liveStartupSingleSegmentMinimumSeconds: loadedOptions.liveStartupSingleSegmentMinimumSeconds,
-            liveFirstServeLatchCoversEngineCut: loadedOptions.liveFirstServeLatchCoversEngineCut,
-            sourceOpenPolicy: loadedOptions.sourceOpenPolicy,
             blockingReloadOverride: loadedOptions.liveBlockingReload,
             liveCadenceObservation: liveCadenceObservation,
             liveClosedCadenceObservation: liveClosedCadenceObservation,
@@ -871,6 +869,7 @@ extension AetherEngine {
         )
         // AE#464: every producer this session builds reads it off the session. Set before start().
         session.audioDelaySeconds = loadedOptions.audioDelaySeconds
+        session.servesSegmentsProgressively = loadedOptions.progressiveSegmentDelivery
         // #240: the pump claims the source link through this gate while it is fetching, so the
         // subtitle side readers can stay out of its way. Set before start().
         session.sideReaderLinkGate = sideReaderLinkGate
@@ -1258,7 +1257,7 @@ extension AetherEngine {
         session.initialStartSeconds = startPosition
 
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
-        var playbackURL = try await Task.detached(priority: .userInitiated) { [session] in
+        var playbackURL = try await BlockingWork.detached(priority: .userInitiated) { [session] in
             try session.start()
         }.value
         // AirPlay (#86): while external playback is active, serve the loopback over the device's LAN IP so
@@ -1934,6 +1933,7 @@ extension AetherEngine {
             self?.publishLiveWindow(edgeSessionTime: edge)
         }
         self.softwareHost = host
+        armHeldPictureRelease(onSoftwareHost: host)
         // #311: a load builds a new host and a new renderer, so an observer installed once by the
         // host app has to be carried across the seam, exactly as the native session does at load.
         host.setVideoFrameTimeObserver(softwareVideoFrameTimeObserver)
@@ -2036,7 +2036,7 @@ extension AetherEngine {
         if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }   // #361
         let forwardBufferSegments = loadedOptions.forwardBufferSegments
         let dvrRetention = loadedOptions.softwareDVRRetention
-        try await Task.detached(priority: .userInitiated) {
+        try await BlockingWork.detached(priority: .userInitiated) {
             [host, preopenedDemuxer, url, sourceHTTPHeaders, isLive, dvrWindowSeconds, probesize, maxAnalyzeDuration, sequentialOrigin, heldSourceConnection, declaredDuration, networkPhaseSink] in
             let dem: Demuxer
             if let pre = preopenedDemuxer {
@@ -2115,7 +2115,7 @@ extension AetherEngine {
             self?.hop(for: generation) { [weak self] in self?.setReaderNetworkPhase(phase) }   // audit Vcore-101
         }
         if loadGeneration == generation { recordStartupCheckpoint(.sessionConstructed) }   // #361
-        try await Task.detached(priority: .userInitiated) {
+        try await BlockingWork.detached(priority: .userInitiated) {
             [host, preopenedDemuxer, url, sourceHTTPHeaders, probesize, maxAnalyzeDuration, sequentialOrigin, heldSourceConnection, declaredDuration, networkPhaseSink] in
             let dem: Demuxer
             if let pre = preopenedDemuxer {
@@ -2369,7 +2369,19 @@ extension AetherEngine {
         // invalidated by a media-services reset (audit LIF-104).
         let keepAudioSwitchItem = audioStreamIndex != nil && discTitleIDOverride == nil
             && !targetSoftwarePath && !mediaServicesWereReset && nativeHost?.avPlayer.currentItem != nil
-        if keepAudioSwitchItem { nativeHost?.pause() }
+        // The software path rebuilds its host and layer, and `stop()` flushes the old one to black.
+        let holdsSoftwarePicture = audioStreamIndex != nil && discTitleIDOverride == nil
+            && targetSoftwarePath && softwareHost != nil
+        if keepAudioSwitchItem || holdsSoftwarePicture {
+            if keepAudioSwitchItem { nativeHost?.pause() }
+            let heldGeneration = loadGeneration
+            await holdPictureAcrossItemSwap()
+            // A stop() or load() that landed while the frame was read owns the engine now.
+            guard loadGeneration == heldGeneration, !Task.isCancelled else {
+                releaseHeldPicture(reason: "rebuild superseded")
+                return nil
+            }
+        }
         stopInternal(resetDisplayCriteria: false,
                      keepNativeHost: !targetSoftwarePath && !mediaServicesWereReset,
                      keepCustomReader: true, keepCurrentItem: keepAudioSwitchItem)
@@ -2394,7 +2406,7 @@ extension AetherEngine {
             do {
                 let isLiveReload = loadedOptions.isLive
                 let discCacheKey = url.absoluteString
-                customPreopened = try await Task.detached(priority: .userInitiated) {
+                customPreopened = try await BlockingWork.detached(priority: .userInitiated) {
                     let d = Demuxer()
                     // isLive preserved: a live custom source must not trigger SEEK_END on reopen.
                     // selectTitleID rebuilds the disc concat stream for the chosen title (#67).
@@ -2417,7 +2429,7 @@ extension AetherEngine {
             if loadGeneration != gen {
                 customPreopened?.markClosed()
                 if let d = customPreopened {
-                    Task.detached { d.close() }
+                    BlockingWork.detached { d.close() }
                 }
                 EngineLog.emit("[AetherEngine] reload superseded after reader reopen; unwinding", category: .engine)
                 return nil
@@ -2428,7 +2440,7 @@ extension AetherEngine {
             // survives the reload (#67). Non-disc URL sources keep customPreopened nil and reopen by URL.
             let headers = loadedOptions.httpHeaders
             do {
-                customPreopened = try await Task.detached(priority: .userInitiated) {
+                customPreopened = try await BlockingWork.detached(priority: .userInitiated) {
                     let d = Demuxer()
                     try d.open(url: url, extraHeaders: headers, profile: reloadProfile, selectTitleID: titleToReopen)
                     return d
@@ -2447,7 +2459,7 @@ extension AetherEngine {
             if loadGeneration != gen {
                 customPreopened?.markClosed()
                 if let d = customPreopened {
-                    Task.detached { d.close() }
+                    BlockingWork.detached { d.close() }
                 }
                 EngineLog.emit("[AetherEngine] reload superseded after disc URL reopen; unwinding", category: .engine)
                 return nil
@@ -2505,7 +2517,7 @@ extension AetherEngine {
                 )
                 presentCurrentLayer()
                 // Keep the latest transport intent if play/pause changed while the rebuild awaited I/O.
-                if audioSelectionTransportIntent ?? resumesPlaying { softwareHost?.play() }
+                if transportIntentUnderReconstruction ?? resumesPlaying { softwareHost?.play() }
                 else { softwareHost?.pause() }
             } else {
                 EngineLog.emit("[AetherEngine] reload: loadNative enter audio=\(audioStreamIndex.map(String.init) ?? "nil") resumeAt=\(String(format: "%.2f", resumeAt))s", category: .engine)
@@ -2596,11 +2608,11 @@ extension AetherEngine {
                     settleCap: loadedOptions.isLive ? .standard : .awaitObservedEnd,
                     isCurrent: { self.loadGeneration == gen })
                 try checkLoadCurrent(gen)
-                if audioSelectionTransportIntent ?? resumesPlaying { nativeHost?.play() }
+                if transportIntentUnderReconstruction ?? resumesPlaying { nativeHost?.play() }
                 else { nativeHost?.pause() }
             }
             try checkLoadCurrent(gen)
-            state = (audioSelectionTransportIntent ?? resumesPlaying) ? .playing : .paused
+            state = (transportIntentUnderReconstruction ?? resumesPlaying) ? .playing : .paused
             // Re-arm samplers: stopInternal nilled them, and the reload path bypasses public load() that normally restarts them. Without this, liveTelemetry stays nil and the stats overlay shows "-" after every audio switch.
             startMemoryProbe()
             startLiveTelemetrySampler()
@@ -2618,6 +2630,7 @@ extension AetherEngine {
             return nil
         } catch {
             guard loadGeneration == gen, !Task.isCancelled else { return nil }
+            releaseHeldPicture(reason: "rebuild failed")
             EngineLog.emit(
                 "[AetherEngine] selectAudioTrack reload failed: \(error), playback stopped",
                 category: .engine

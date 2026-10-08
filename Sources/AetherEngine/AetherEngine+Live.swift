@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import CoreGraphics
 
@@ -25,7 +24,7 @@ extension AetherEngine {
         // Segment table and tfdt use continuous output time, including across source PTS rebases.
         let outputSeconds = seconds - liveSessionShiftSeconds
         let gen = loadGeneration
-        let source = await Task.detached(priority: .userInitiated) { [session] in
+        let source = await BlockingWork.detached(priority: .userInitiated) { [session] in
             session.scrubThumbnailSource(atSeconds: outputSeconds)
         }.value
         guard let source else { return nil }
@@ -503,13 +502,28 @@ extension AetherEngine {
         guard isLive, videoRoute != .software, nativeItemSeekableEnd > 0 else { return nil }
         let edge = nativeItemSeekableEnd + liveSessionShiftSeconds + liveItemAxisOffsetSeconds
         guard edge.isFinite else { return nil }
-        if nativeVideoSession?.nativeLiveDVRWindow?.windowSeconds != nil,
+        // The effective allowance, which a lease renewal or expiry moves (#714), not the load option.
+        if liveWindow?.windowSeconds != nil,
            let fallback = Self.nativePlayedResidentEdge(reportedEdge: edge, playedTime: currentTime,
                 publishedEdge: liveWindow?.edgeTime ?? currentTime,
                 residentRange: residentLiveRangeSessionSeconds()) {
             return fallback
         }
         return edge
+    }
+
+    /// The same session-axis fallback for publication and an actual native seek. A stale
+    /// item edge cannot disqualify already-played resident history, and a prefetched ceiling
+    /// cannot create history. Preserve the published played frontier across a backward seek.
+    nonisolated static func nativePlayedResidentEdge(
+        reportedEdge: Double, playedTime: Double, publishedEdge: Double,
+        residentRange: ClosedRange<Double>?
+    ) -> Double? {
+        guard let resident = residentRange,
+              resident.lowerBound.isFinite, resident.upperBound.isFinite,
+              reportedEdge.isFinite, reportedEdge <= resident.lowerBound,
+              playedTime.isFinite, publishedEdge.isFinite else { return nil }
+        return min(max(max(playedTime, publishedEdge), resident.lowerBound), resident.upperBound)
     }
 
     /// Update native HLS retention without load/reload, source requests, or a second player.
@@ -543,20 +557,6 @@ extension AetherEngine {
         return Int64(session.nativeLiveDVRMandatoryBytes)
     }
 
-    /// The same session-axis fallback for publication and an actual native seek. A stale
-    /// item edge cannot disqualify already-played resident history, and a prefetched ceiling
-    /// cannot create history. Preserve the published played frontier across a backward seek.
-    nonisolated static func nativePlayedResidentEdge(
-        reportedEdge: Double, playedTime: Double, publishedEdge: Double,
-        residentRange: ClosedRange<Double>?
-    ) -> Double? {
-        guard let resident = residentRange,
-              resident.lowerBound.isFinite, resident.upperBound.isFinite,
-              reportedEdge.isFinite, reportedEdge <= resident.lowerBound,
-              playedTime.isFinite, publishedEdge.isFinite else { return nil }
-        return min(max(max(playedTime, publishedEdge), resident.lowerBound), resident.upperBound)
-    }
-
     /// Publish the live timeline after reconciling actual resident history.
     func publishLiveWindow(edgeSessionTime: Double) {
         guard var w = liveWindow else { return }
@@ -567,11 +567,13 @@ extension AetherEngine {
             // A route transition never transfers expanded native retention into it.
             w.setWindowSeconds(softwareHost?.liveDVRWindowSeconds)
         }
+        // Resident media bounds the allowance on both playback routes.
         var residentFloor = videoRoute == .software ? softwareHost?.liveDVRResidentFloor : residentLiveFloorSessionSeconds()
         // An empty/delayed AVPlayer seekableTimeRanges mirror yields only the item's zero
         // (plus its axis offset). It must not pin a ready native DVR window at that zero
         // while its real cache and played clock advance. Admit only already-played,
         // contiguous resident media; never promote the producer's prefetched frontier.
+        // `w.windowSeconds` is the effective (renewed or expired) allowance set just above.
         var reportedEdge = edgeSessionTime
         if videoRoute == .loopback, w.windowSeconds != nil,
            let floor = residentFloor, floor.isFinite, reportedEdge <= floor,

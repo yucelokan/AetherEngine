@@ -1,4 +1,3 @@
-// Modified 2026-10-04; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import os
 import AetherLibavformat

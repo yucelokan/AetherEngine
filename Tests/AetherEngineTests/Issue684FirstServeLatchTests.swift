@@ -5,9 +5,10 @@
 // holdback, served after its grace) the second one waited out a second grace: measured on a
 // three-segment 6 s upstream as 2.012 s to the first manifest, then 2.02 s more before `init.mp4`.
 //
-// The fork keeps its first-request-only contract on raw sources through an explicit host
-// option. Upstream leaves that arm off by default until a device validates its edge behavior.
-// The advertised target duration and holdback remain unchanged.
+// Scoped to ingest sessions on purpose. On a source the engine cuts itself (raw MPEG-TS) the second
+// grace is part of where the session ends up behind the producing edge: without it the first picture
+// comes 2 s sooner and the session sits up to 2 s closer to the edge for its whole life, which nobody
+// has measured on a device. That is AE#594's open question, so that path behaves as it did in 7.25.1.
 import XCTest
 @testable import AetherEngine
 
@@ -29,7 +30,6 @@ final class Issue684FirstServeLatchTests: XCTestCase {
             isLive: true,
             liveWindowSizing: LiveWindowSizing(targetSegmentDurationSeconds: 0.5, dvrWindowSeconds: nil),
             allowsBoundedDegradedStart: true,
-            firstServeLatchCoversEngineCut: !ingest,
             liveCadencePolicy: policy
         )
         return (provider, cache)
@@ -58,8 +58,8 @@ final class Issue684FirstServeLatchTests: XCTestCase {
         XCTAssertLessThan(second, 0.2, "a manifest has gone out; the gate is open")
     }
 
-    /// Downstream contract: a raw source also pays the startup grace only once.
-    func testOnASelfCutSourceTheSecondRequestDoesNotRepeatItsGrace() {
+    /// A source the engine cuts itself keeps 7.25.1's gate: the second request waits its own grace.
+    func testOnASelfCutSourceTheSecondRequestStillWaitsItsGrace() {
         let (provider, cache) = makeProvider(ingest: false)
         defer { cache.close() }
         provider.appendLiveSegment(index: 0, startSeconds: 0, durationSeconds: 0.2)
@@ -71,7 +71,7 @@ final class Issue684FirstServeLatchTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(first, 0.45)
         let second = seconds { served = provider.waitForFirstLiveSegment(timeout: 3) }
         XCTAssertTrue(served)
-        XCTAssertLessThan(second, 0.2, "successful raw-source admission remains latched")
+        XCTAssertGreaterThanOrEqual(second, 0.45, "unchanged from 7.25.1")
     }
 
     /// The latch is on a SERVED manifest. A gate that gave up with nothing cut has served none.

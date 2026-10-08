@@ -1,4 +1,3 @@
-// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 /// One statement about a seek's lifecycle: its outcome and the target it belonged to, in a single value

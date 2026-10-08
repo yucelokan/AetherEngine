@@ -1,4 +1,3 @@
-// Modified 2026-10-01; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import AetherLibavcodec
 
@@ -396,12 +395,12 @@ enum SessionOptionCorrection {
         "audioBridgeMode", "isLive", "audioOnly",
         "dvrWindowSeconds",
         "softwareDVRRetention",
-        "liveBlockingReload", "liveJoinProfile", "liveStartupGraceSeconds", "liveStartupSingleSegmentMinimumSeconds", "liveFirstServeLatchCoversEngineCut", "sourceOpenPolicy", "liveJoinStartsImmediately",
+        "liveBlockingReload", "liveJoinProfile", "sourceOpenPolicy", "liveStartupGraceSeconds", "liveStartupSingleSegmentMinimumSeconds", "liveJoinStartsImmediately",
         "clampsLiveResumeToWindow", "nativeRemoteHLS", "nativeRemoteHLSIngestFallback",
         "preserveASSMarkup", "prepareNativeSubtitles", "eagerNativeSubtitleReaders", "serveIFramePlaylist", "confirmAtmos",
         "nativeSubtitlePreferredLanguages", "sequentialOrigin", "maxConcurrentSourceRequests", "heldSourceConnection",
         "declaredDurationSeconds", "probesize", "maxAnalyzeDuration", "preferredAudioLanguages",
-        "preferredSubtitleLanguages", "externalSubtitles", "forwardBufferSegments", "autoplay",
+        "preferredSubtitleLanguages", "externalSubtitles", "forwardBufferSegments", "progressiveSegmentDelivery", "autoplay",
         "audioDelaySeconds", "teletextPage", "deinterlaceMode", "deinterlaceFieldRate", "preferredDecodePath",
         "escalatesToSoftwarePath", "sharedOutputRole", "isLiveRejoin", "subtitleSessionCarryover",
     ]

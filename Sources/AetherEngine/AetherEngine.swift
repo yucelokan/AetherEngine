@@ -1,4 +1,3 @@
-// Modified 2026-10-02; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import Darwin.Mach
 import QuartzCore
@@ -356,7 +355,7 @@ public final class AetherEngine: ObservableObject {
         session: HLSVideoEngine?, itemSeconds: Double
     ) async -> Double {
         guard let session else { return itemSeconds }
-        return await Task.detached(priority: .userInitiated) {
+        return await BlockingWork.detached(priority: .userInitiated) {
             session.preparedSeekLanding(itemSeconds: itemSeconds)
         }.value
     }
@@ -1718,7 +1717,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     /// The surface the layer is presented on: the most recently bound one that is still alive.
-    private var boundView: AetherPlayerView? {
+    var boundView: AetherPlayerView? {
         boundSurfaces.last { $0.view != nil }?.view
     }
 
@@ -1736,6 +1735,23 @@ public final class AetherEngine: ObservableObject {
         boundSurfaces.removeAll { $0.view == nil || $0.view === view }
         boundSurfaces.append(BoundSurface(view: view))
         presentCurrentLayer()
+    }
+
+    /// Bind the surface the engine holds the picture on across the item swap of an audio-track switch,
+    /// for a host that renders the native path through AVKit instead of `AetherPlayerView`. Without
+    /// one the engine holds it on the bound `AetherPlayerView`, and with neither nothing is held.
+    public func bindStillView(_ view: AetherStillView) {
+        if let previous = boundStillView, previous !== view, heldPictureView === previous {
+            releaseHeldPicture(reason: "still view replaced")
+        }
+        boundStillView = view
+    }
+
+    /// Unbind a still view. Idempotent; takes down a picture held on it.
+    public func unbindStillView(_ view: AetherStillView) {
+        guard boundStillView === view else { return }
+        if heldPictureView === view { releaseHeldPicture(reason: "still view unbound") }
+        boundStillView = nil
     }
 
     /// Unbind a view. Idempotent. Unbinding the surface the layer is on detaches it and presents the
@@ -3531,17 +3547,28 @@ public final class AetherEngine: ObservableObject {
     /// `sessionRebuildResumesPlaying`. See `rebuildResumesPlaying`.
     var transportIntentUnderReconstruction: Bool?
     private(set) var audioSelectionTask: Task<Void, Never>?
+    /// AE#711 follow-up: the picture held over an in-place item swap. See `holdPictureAcrossItemSwap`.
+    var heldPictureRelease: AnyCancellable?
+    weak var heldPictureView: (any HeldStillSurface)?
+    weak var boundStillView: AetherStillView?
+    /// Why the last hold showed nothing, for the log and the tests that pin it.
+    var heldPictureLastSkip: String?
+    var heldPictureToken = 0
+    var heldPictureShownAt: ContinuousClock.Instant?
+    /// What took the last held picture down, for the log line and the tests that pin it.
+    var heldPictureLastRelease: String?
+    /// A hold over a software rebuild waits for `loadSoftware` to install the host it comes down on.
+    var heldPictureAwaitsSoftwareHost = false
+    /// Which route the last held picture came from, for the log line and the tests that pin it.
+    var heldPictureLastRoute: String?
     private var pendingAudioSelection: Int?
     private var audioSelectionEpoch = UUID()
-    // Non-nil only during an audio rebuild. Transport received across awaits wins.
-    var audioSelectionTransportIntent: Bool?
 
     private func cancelPendingAudioSelection() {
         audioSelectionEpoch = UUID()
         audioSelectionTask?.cancel()
         audioSelectionTask = nil
         pendingAudioSelection = nil
-        audioSelectionTransportIntent = nil
     }
 
     /// AE#464 round 3: true while a re-anchor raised by `setAudioDelay` is running, so the presses
@@ -3558,6 +3585,15 @@ public final class AetherEngine: ObservableObject {
     /// The transport state a rebuild of this session has to come back in (#464 round 2). Asks the
     /// native host for its durable intent where there is one to ask, exactly as `togglePlayPause`
     /// does, and falls back to `state` on the routes that have no competing transport owner.
+    /// AE#711 follow-up: a play/pause that arrives while a session-preserving rebuild runs is the
+    /// transport that rebuild has to come back in. Recorded on the flag both rebuild routes raise
+    /// rather than on `.loading`, because `play()` itself moves `.loading` to `.playing` and a pause
+    /// after it would otherwise go unrecorded. Read back where each rebuild settles its transport.
+    func recordTransportDuringRebuild(playing: Bool) {
+        guard sessionPreservingReloadInFlight else { return }
+        transportIntentUnderReconstruction = playing
+    }
+
     var sessionRebuildResumesPlaying: Bool {
         let nativeIntent = (nativeHost != nil && !audioAVPlayerActive && audioHost == nil && softwareHost == nil)
             ? nativeHost?.transportIntentIsPlaying
@@ -3724,7 +3760,7 @@ public final class AetherEngine: ObservableObject {
         //
         // Issue #114: the declaration runs off the main thread. See `audioSessionCategoryTask`.
         #if os(iOS) || os(tvOS)
-        audioSessionCategoryTask = Task.detached(priority: .userInitiated) {
+        audioSessionCategoryTask = BlockingWork.detached(priority: .userInitiated) {
             let session = AVAudioSession.sharedInstance()
             do {
                 try session.setCategory(.playback, mode: .moviePlayback, policy: AetherEngine.audioSessionRouteSharingPolicy)
@@ -4039,6 +4075,7 @@ public final class AetherEngine: ObservableObject {
         // has already unloaded the item, so there is nothing left to hand over in place.
         let handOverInPlace = consumeInPlaceItemHandoverRequest(priorBackendWasNative: priorBackendWasNative)
         cancelPendingAudioSelection()
+        releaseHeldPicture(reason: "new load")
         pendingInPlaceItemHandover = handOverInPlace
         // #128 follow-up: preserve the previous session's display criteria across the load seam. Nil-ing it
         // here bounces the panel through SDR before apply() re-negotiates the same mode on video->video
@@ -4330,8 +4367,9 @@ public final class AetherEngine: ObservableObject {
         do {
             // Detach avformat_open_input + find_stream_info off @MainActor (~6 s on a slow CDN).
             // AetherEngine#10: a @MainActor async body without a suspension point blocks the main thread
-            // despite the async signature; Task.detached.value introduces a real background hop.
-            try await Task.detached(priority: .userInitiated) { [probe, source, options] in
+            // despite the async signature; a detached task's value introduces a real background hop,
+            // and BlockingWork keeps that hop off the cooperative pool while the open blocks.
+            try await BlockingWork.detached(priority: .userInitiated) { [probe, source, options] in
                 // Caller-bounded find_stream_info budget (#68); nil keeps the .playback default. This probe
                 // demuxer is reused as the session demuxer, so the cap lands on the open that actually pays it.
                 let probeProfile = DemuxerOpenProfile.playback.withProbeBudget(
@@ -4381,7 +4419,7 @@ public final class AetherEngine: ObservableObject {
                        colorTransfer: stream.pointee.codecpar.pointee.color_trc,
                        colorMatrix: stream.pointee.codecpar.pointee.color_space) {
                     let auditHeaders = options.httpHeaders
-                    detectedDVRPUProfile = await Task.detached(priority: .userInitiated) {
+                    detectedDVRPUProfile = await BlockingWork.detached(priority: .userInitiated) {
                         DolbyVisionRecordAudit.rpuProfileOfSource(url: auditURL, extraHeaders: auditHeaders)
                     }.value
                     correctedDVProfile = DolbyVisionRecordAudit.correctedProfile(
@@ -4445,7 +4483,7 @@ public final class AetherEngine: ObservableObject {
         if loadGeneration != gen {
             probe.markClosed()
             if probeOpened {
-                Task.detached { [probe] in probe.close() }
+                BlockingWork.detached { [probe] in probe.close() }
             }
             try checkLoadCurrent(gen)
         }
@@ -4743,7 +4781,7 @@ public final class AetherEngine: ObservableObject {
                 if loadGeneration != gen {
                     probe.markClosed()
                     if probeOpened {
-                        Task.detached { [probe] in probe.close() }
+                        BlockingWork.detached { [probe] in probe.close() }
                     }
                     try checkLoadCurrent(gen)
                 }
@@ -4808,7 +4846,7 @@ public final class AetherEngine: ObservableObject {
             if loadGeneration != gen {
                 probe.markClosed()
                 if probeOpened {
-                    Task.detached { [probe] in probe.close() }
+                    BlockingWork.detached { [probe] in probe.close() }
                 }
                 try checkLoadCurrent(gen)
             }
@@ -4922,9 +4960,7 @@ public final class AetherEngine: ObservableObject {
         var useSoftwarePath = VideoRoutingPolicy.requiresSoftwarePath(
             codecID: detectedCodecID,
             fieldOrder: detectedFieldOrder,
-            // The first AV1 capability read registers a VideoToolbox decoder. Keep that
-            // potentially slow first-use work off every H.264/HEVC startup.
-            av1Available: detectedCodecID == AV_CODEC_ID_AV1 && VTCapabilityProbe.av1Available,
+            av1Available: VTCapabilityProbe.av1Available,
             spsIndicatesInterlaced: spsIndicatesInterlaced,
             stereo3DType: containerStereoType
         )
@@ -4945,14 +4981,14 @@ public final class AetherEngine: ObservableObject {
                fieldOrder: detectedFieldOrder,
                spsIndicatesInterlaced: spsIndicatesInterlaced) {
             let videoIdx = probe.videoStreamIndex
-            let verdict = await Task.detached(priority: .userInitiated) { [probe] in
+            let verdict = await BlockingWork.detached(priority: .userInitiated) { [probe] in
                 let verdict = InterlaceProbe.run(demuxer: probe, streamIndex: videoIdx)
                 probe.seek(to: 0)  // sample consumed packets; the session reuses this demuxer
                 return verdict
             }.value
             if loadGeneration != gen {
                 probe.markClosed()
-                Task.detached { [probe] in probe.close() }
+                BlockingWork.detached { [probe] in probe.close() }
                 try checkLoadCurrent(gen)
             }
             if InterlaceProbe.refutesDeclaredInterlace(verdict) {
@@ -5104,7 +5140,7 @@ public final class AetherEngine: ObservableObject {
                dvBlCompatID: dvConfig.blCompatID,
                presentsDolbyVisionBaseLayer: presentsDolbyVisionBaseLayer) {
             probe.markClosed()
-            Task.detached { [probe] in probe.close() }
+            BlockingWork.detached { [probe] in probe.close() }
             let profileLabel = detectedCodecID == AV_CODEC_ID_AV1 ? "10.0" : "5"
             EngineLog.emit(
                 "[AetherEngine] DV Profile \(profileLabel) routed to the software path; IPT-PQ-c2 has "
@@ -5121,7 +5157,7 @@ public final class AetherEngine: ObservableObject {
            (customReader as? LiveIngestSourceInfo)?.companionAudioReader != nil,
            probe.audioStreamIndex < 0 {
             probe.markClosed()
-            Task.detached { [probe] in probe.close() }
+            BlockingWork.detached { [probe] in probe.close() }
             EngineLog.emit(
                 "[AetherEngine] demuxed-audio live source routed to the software path "
                 + "(codec=\(detectedCodecID.rawValue)); side-audio merge is native-only, failing fast",
@@ -5346,7 +5382,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func play() {
-        if audioSelectionTransportIntent != nil { audioSelectionTransportIntent = true }
+        recordTransportDuringRebuild(playing: true)
         // AetherEngine#164: a VOD parked at its final frame (scrubbed to the end, or paused there)
         // cannot advance; AVPlayer.play() would no-op and leave the button frozen. Rewind to the start
         // first, then resume. `.ended` is excluded (see shouldRewindBeforePlay): it stays terminal so a
@@ -5368,7 +5404,7 @@ public final class AetherEngine: ObservableObject {
     }
 
     public func pause() {
-        if audioSelectionTransportIntent != nil { audioSelectionTransportIntent = false }
+        recordTransportDuringRebuild(playing: false)
         resumeAfterInterruption = false
         activeTransportHost?.pause()
         isBuffering = false
@@ -5514,6 +5550,11 @@ public final class AetherEngine: ObservableObject {
         options.subtitleSessionCarryover = carryover
         try await load(url: url, startPosition: resume, options: options,
                        audioSourceStreamIndex: audioToRestore.map { Int32($0) }, discTitleID: titleID)
+        // AE#711 follow-up: `load` autostarts from the flag it was handed; a play/pause that arrived
+        // while it ran is the newer word.
+        if let intent = transportIntentUnderReconstruction, intent != options.autoplay {
+            if intent { play() } else { pause() }
+        }
         restoreSubtitleSelection(from: carryover, resumeAnchor: resume)
         // Arm the watchdog so a live reopen whose AVPlayer never becomes ready fails visibly instead of freezing.
         if options.isLive, !options.nativeRemoteHLS, playbackBackend == .native {
@@ -5615,8 +5656,9 @@ public final class AetherEngine: ObservableObject {
                                      residentRange: origin == .liveRejoin || videoRoute == .loopback
                                         ? residentLiveRangeSessionSeconds() : nil,
                                      itemAxisOffset: liveItemAxisOffsetSeconds,
+                                     // The effective allowance after a lease renewal or expiry (#714).
                                      nativePlayedTime: videoRoute == .loopback
-                                        && nativeVideoSession?.nativeLiveDVRWindow?.windowSeconds != nil
+                                        && $0.windowSeconds != nil
                                             ? currentTime : nil)
               }
             : nil
@@ -6207,7 +6249,7 @@ public final class AetherEngine: ObservableObject {
     /// (old.stop + waitForFinish up to 5s) and is designed to run off-main, so dispatch it detached.
     private func reanchorProducerToPlaylistTime(_ seconds: Double) {
         guard let session = nativeVideoSession else { return }
-        Task.detached {
+        BlockingWork.detached {
             let idx = session.segmentIndexForPlaylistTime(seconds)
             // Authoritative re-anchor: deadline recovery must win the coalescer over any stale
             // in-flight scrub target.
@@ -6315,6 +6357,7 @@ public final class AetherEngine: ObservableObject {
 
     public func stop(resetDisplayCriteria: Bool = true, finalTeardown: Bool? = nil) {
         cancelPendingAudioSelection()
+        releaseHeldPicture(reason: "stop")
         nextLoadRequestsInPlaceItemHandover = false
         stopInternal(resetDisplayCriteria: resetDisplayCriteria,
                      finalTeardown: finalTeardown ?? resetDisplayCriteria)
@@ -7049,14 +7092,12 @@ public final class AetherEngine: ObservableObject {
             defer {
                 if self.audioSelectionEpoch == epoch {
                     self.audioSelectionTask = nil
-                    self.audioSelectionTransportIntent = nil
                 }
             }
             while let selected = self.pendingAudioSelection {
                 self.pendingAudioSelection = nil
                 guard !Task.isCancelled, self.audioSelectionEpoch == epoch else { return }
                 if self.activeAudioTrackIndex == selected { continue }
-                self.audioSelectionTransportIntent = self.sessionRebuildResumesPlaying
                 let beforeReload = self.loadGeneration
                 let failure = await self.reloadWithAudioOverride(
                     url: url, audioStreamIndex: Int32(selected), expectedGeneration: beforeReload)

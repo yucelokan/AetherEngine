@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import Testing
 @testable import AetherEngine
@@ -39,5 +38,18 @@ struct LiveTimestampRollbackTests {
         #expect(abs(sourceAxis.itemSeconds(forSourceSeconds: engine.liveWindow!.edgeTime)! - 57.68) < 0.001)
         #expect(abs(landing.clockTarget - 40.24) < 0.001)
         #expect(landing.clockTarget <= 40.24)
+    }
+    @Test("A stale range admits played resident media but never a prefetched frontier")
+    func staleRangeUsesPlayedHistory() {
+        #expect(AetherEngine.nativePlayedResidentEdge(reportedEdge: 0, playedTime: 24,
+            publishedEdge: 20, residentRange: 10...100) == 24)
+        #expect(AetherEngine.nativePlayedResidentEdge(reportedEdge: 0, playedTime: 14,
+            publishedEdge: 24, residentRange: 10...100) == 24)
+        #expect(AetherEngine.nativePlayedResidentEdge(reportedEdge: 0, playedTime: 4,
+            publishedEdge: 4, residentRange: 10...100) == 10)
+        #expect(AetherEngine.nativePlayedResidentEdge(reportedEdge: 40, playedTime: 24,
+            publishedEdge: 20, residentRange: 10...100) == nil)
+        #expect(AetherEngine.nativePlayedResidentEdge(reportedEdge: 0, playedTime: .nan,
+            publishedEdge: 20, residentRange: 10...100) == nil)
     }
 }

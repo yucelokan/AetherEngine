@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import XCTest
 @testable import AetherEngine
 
@@ -43,18 +42,6 @@ final class AudioSelectionOwnershipTests: XCTestCase {
         XCTAssertEqual(engine.loadGeneration, stoppedGeneration)
         XCTAssertNil(engine.loadedURL)
         XCTAssertEqual(engine.state, .idle)
-    }
-
-    func testTransportCommandsDuringAudioRebuildKeepLatestIntent() throws {
-        let engine = try fixture()
-        defer { engine.stop() }
-        engine.audioSelectionTransportIntent = true
-        engine.pause()
-        XCTAssertEqual(engine.audioSelectionTransportIntent, false)
-        engine.play()
-        XCTAssertEqual(engine.audioSelectionTransportIntent, true)
-        engine.stop()
-        XCTAssertNil(engine.audioSelectionTransportIntent)
     }
 
     func testLiveURLDoesNotRequireHostReload() throws {

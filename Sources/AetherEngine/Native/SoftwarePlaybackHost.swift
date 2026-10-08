@@ -1,4 +1,3 @@
-// Modified 2026-10-02; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 import AVFoundation
 import CoreMedia
@@ -112,8 +111,19 @@ final class SoftwarePlaybackHost {
     /// point it uses for `AVPlayerLayer`.
     var displayLayer: AVSampleBufferDisplayLayer { renderer.displayLayer }
 
+    /// AE#711 follow-up: the picture on screen now, read back from the renderer before a rebuild's
+    /// `stop()` flushes it, so the engine can hold it over the new host's startup. Falls back to the
+    /// newest frame enqueued, which a layer that is not on screen is all there is of.
+    func displayedFrame() -> CVPixelBuffer? {
+        if #available(visionOS 1.1, *),
+           let shown = renderer.displayLayer.sampleBufferRenderer.displayedPixelBuffer() {
+            return shown
+        }
+        return renderer.lastEnqueuedFrame
+    }
+
     /// SW-PiP Phase C: engine-fed cue mirror + PiP gate for the renderer's frame compositor.
-    func updateSubtitleCompositor(cues: [SubtitleCue], enabled: Bool, delaySeconds: Double = 0) {
+    func updateSubtitleCompositor(cues: [SubtitleCue], enabled: Bool, delaySeconds: Double) {
         renderer.subtitleCompositor.update(cues: cues, enabled: enabled, delaySeconds: delaySeconds)
     }
 
@@ -271,7 +281,7 @@ final class SoftwarePlaybackHost {
         let scratch = base.appendingPathComponent("dvr-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
-            // The upstream chunk spool's disk budget and the caller's lease cap both apply.
+            // The chunk spool's disk budget and the caller's lease cap both apply.
             let available = (try? base.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
                 .volumeAvailableCapacity.map(Int64.init)
             let claim = RetentionClaims.shared.claim(volumeAvailableBytes: available) {
@@ -1086,7 +1096,7 @@ final class SoftwarePlaybackHost {
                 } : nil
             let initialSourceClock = initialClockTime.seconds
             let videoReorderDepth = Self.presentationReorderDepth(codecID: vCodecID)
-            let cacheResult = await Task.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim)? in
+            let cacheResult = await BlockingWork.detached(priority: .utility) { () throws -> (SoftwarePacketReadAhead, RetentionClaims.Claim)? in
                 let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
                 let available = (try? temp.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
                     .volumeAvailableCapacity.map(Int64.init)
@@ -1441,7 +1451,7 @@ final class SoftwarePlaybackHost {
 
         var cacheHit = false
         if let packetSource, let cacheGeneration {
-            let preparation = await Task.detached(priority: .userInitiated) {
+            let preparation = await BlockingWork.detached(priority: .userInitiated) {
                 try packetSource.prepareSeek(cacheGeneration, to: sourceSeconds)
             }.result
             guard seekGeneration == generation, !stopRequested else { return .superseded }

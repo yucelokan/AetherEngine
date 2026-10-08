@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Foundation
 
 /// AE#359: subtitles carried as a separate HLS rendition on the live ingest path.

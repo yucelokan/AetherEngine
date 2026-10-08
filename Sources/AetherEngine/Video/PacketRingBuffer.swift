@@ -1,4 +1,3 @@
-// Modified 2026-09-30; see MODIFICATIONS.md for scope and licensing.
 import Darwin
 import Foundation
 
@@ -85,7 +84,7 @@ final class PacketRingBuffer: @unchecked Sendable {
     private let windowSeconds: Double
     private let byteBudget: Int
     /// An opt-in capacity lease applies a strict startup and playback cap to this chunk spool.
-    /// Standalone upstream callers retain their original byteBudget behavior.
+    /// Callers without retention leases retain their original byteBudget behavior.
     private let strictRetention: Bool
     private let startupMaximumBytes: Int
     private let playbackCushionBytes: Int
@@ -139,7 +138,7 @@ final class PacketRingBuffer: @unchecked Sendable {
         self.playbackCushionBytes = retention?.playbackCushionBytes ?? 0
         self.playbackCushionSeconds = retention?.playbackCushionSeconds ?? 0
         // A strict lease needs chunks smaller than its smallest startup cap, including tiny test
-        // budgets. Standalone upstream callers retain the normal 64 KiB minimum chunk size.
+        // budgets. Callers without retention leases retain the normal 64 KiB minimum chunk size.
         let target = retention == nil
             ? min(chunkTargetBytes, max(64 << 10, self.byteBudget / 16))
             : min(chunkTargetBytes, max(1, self.startupMaximumBytes / 16))
@@ -646,7 +645,7 @@ final class PacketRingBuffer: @unchecked Sendable {
                 }
             }
         } else {
-            // The upstream standalone ring's soft byte budget remains unchanged.
+            // The standalone ring's soft byte budget remains unchanged.
             while retainedDiskBytes > byteBudget, chunks.count > 1 {
                 if let p = keyframeInLaterChunkLocked() {
                     dropEntriesLocked(upTo: p)

@@ -1,10 +1,10 @@
 # Downstream engine changes
 
-Date: 2026-10-08. Current base: upstream 7.32.0,
-`4b317b783a81751c36579a4af138cff32ae1c986`.
+Date: 2026-10-09. Current base: upstream 7.33.2,
+`e7afcfad3973426a6ffff31fc111f6b1e5078061`.
 
 The current runtime source, package manifest, tests, scripts and engine
-documentation match the upstream 7.32.0 release. All ten downstream contribution
+documentation match the upstream 7.33.2 release. All ten downstream contribution
 PRs (#708–#717) are merged upstream and included in this release. The fork now
 retains only this historical modification record and the incorporated GPL text;
 the entries below describe prior revisions.

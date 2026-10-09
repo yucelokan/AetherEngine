@@ -350,7 +350,7 @@ final class SoftwarePlaybackHost {
     /// It reads the SOURCE axis, the same axis as `SoftwareVideoFrameTime.presentation` and as the
     /// subtitle cues, so an overlay paced against it needs no conversion.
     var presentationTimebase: CMTimebase? {
-        audioOutput?.synchronizer.timebase
+        audioOutput?.sourceTimebase
     }
 
     /// #311: forwarded to the renderer, which is where a frame is actually handed over. Set through
@@ -1051,7 +1051,9 @@ final class SoftwarePlaybackHost {
         self.splitDisplaySetSubtitleStreamIndices = dem.splitDisplaySetSubtitleStreamIndices()
 
         // AudioOutput owns the AVSampleBufferRenderSynchronizer (master clock). Created unconditionally: video-only previously got no clock (frozen frame, currentTime=0). Layer attached in play() after the engine hangs it in the view hierarchy (attaching free-floating fails FigVideoQueueRemote -12080 on tvOS 26+).
-        self.audioOutput = AudioOutput()
+        let audioOutput = AudioOutput()
+        self.audioOutput = audioOutput
+        renderer.setTimeline(audioOutput.timeline)   // AE#395
         self.audioOutput?.volume = volume
         self.audioOutput?.setPresentationOffset(seconds: audioDelaySeconds)   // AE#464
         // AE#395: the route this session plays into, the counterpart of the native host's line. Without
@@ -1065,19 +1067,25 @@ final class SoftwarePlaybackHost {
         resetFeederState()
 
         if let start = startPosition, start.isFinite, start > 0 {
+            // AE#724: the anchor is a session-axis position; on an offset-origin source it is carried
+            // over before it reaches the demuxer, the skip threshold and the clock, as a seek's is.
+            let zero = SWClockAnchorPolicy.resumeSessionZero(sourceOriginSeconds: dem.resolvedSourceStartOrigin)
+            clockSessionZero = zero
+            let sourceStart = SWClockAnchorPolicy.sourceSeconds(forSession: start, sessionZeroSeconds: zero)
             // #254: same off-main, deadline-bounded reposition the transport seek uses. A resume into a
             // remote source that has to scan for its landing would otherwise block the main thread here.
-            _ = await dem.seekBounded(to: start, timeout: Self.seekBudgetSeconds, on: seekQueue)
+            _ = await dem.seekBounded(to: sourceStart, timeout: Self.seekBudgetSeconds, on: seekQueue)
             // This is load()'s only suspension point, so it is also the only place a stop() can land
             // mid-load. Arming the clock and publishing isReady on a session already torn down would
             // hand the engine a host it has stopped.
             guard !stopRequested else { return }
             // Mirror seek() skip-PTS + clock alignment so demux drops pre-keyframe frames and synchronizer starts at the resume offset.
-            let startTime = CMTime(seconds: start, preferredTimescale: 90000)
+            let startTime = CMTime(seconds: sourceStart, preferredTimescale: 90000)
             videoDecoder.skipUntilPTS = startTime
             renderer.setSkipThreshold(startTime)
             initialClockTime = startTime
             currentTime = start
+            sourceClockSeconds = sourceStart
         } else {
             initialClockTime = .zero
         }
@@ -1920,7 +1928,7 @@ final class SoftwarePlaybackHost {
             self?.backgroundAudioOnly ?? false
         }
         // #107: the demux loop reports the resolved session-zero offset when it re-anchors
-        // the clock at a deviating first-sample PTS (mid-stream-joined source).
+        // the clock at a first-sample PTS far past the anchor (mid-stream-joined source).
         let onClockAnchored: @Sendable (Double) -> Void = { [weak self] zero in
             self?.clockSessionZero = zero
         }
@@ -3166,7 +3174,7 @@ final class SoftwarePlaybackHost {
                 }
                 // Arm clock on first decoded audio buffer; latch so subsequent packets don't snap clock back.
                 if !clockArmed(), !buffers.isEmpty {
-                    // #107: anchor at the buffer PTS when it deviates from the load anchor
+                    // #107: anchor at the buffer PTS when it lies far past the load anchor
                     // (mid-stream-joined source); aligned sources keep the anchor verbatim.
                     let firstPts = CMSampleBufferGetPresentationTimeStamp(buffers[0])
                     let resolution = SWClockAnchorPolicy.resolve(
@@ -3218,6 +3226,9 @@ final class SoftwarePlaybackHost {
                 guard !self.seekInFlight else { return }
                 let raw = aOut.currentTimeSeconds
                 self.emitDiagIfDue(clock: raw)
+                // AE#724: until the first sample arms it, the synchronizer still reads 0, and a paused
+                // resume would publish that over the anchor load() set.
+                if !self.isLive, !self.clockArmed { return }
                 if raw.isFinite, raw >= 0 {
                     self.vodPacketReadAhead?.updatePlayhead(raw)
                     // Raw clock = source/subtitle axis; published alongside the mapped position (#107).

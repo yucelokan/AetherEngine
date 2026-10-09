@@ -12,6 +12,105 @@ the public-API contract.
 
 _Nothing yet._
 
+## [7.33.2] - 2026-10-09
+
+### Fixed
+
+- **A speed set while paused no longer starts playback.** `setRate(_:)` with a non-zero rate went
+  straight to the transport host, and on the native paths that is `avPlayer.rate = x`, which plays.
+  `state` was never touched, so the engine kept reporting `.paused` over a running picture and a
+  host's play/pause button offered the wrong action. While the session is paused the rate now only
+  becomes the rate the next `play()` starts at (`desiredRate` plus the host's resume rate, the #436
+  machinery), and the session stays paused. Measured in AetherPlayer on the native route: before,
+  two frames 1.5 s apart differed after a speed step on a paused session; after, the transport log
+  shows no rate write until the resume, which comes back at the new speed. A host that relied on
+  `setRate` to resume has to call `play()`. (#730)
+
+## [7.33.1] - 2026-10-09
+
+### Fixed
+
+- **A software session no longer goes silent on an AirPlay receiver past 44739 s of source clock.**
+  The software host stamped its audio and video buffers, and anchored its synchronizer, on the source
+  PTS, and a live channel carries a broadcast clock there. A Belkin AirPlay 2 receiver fed from tvOS
+  27.0 played nothing once those stamps passed 2^31 samples of 48 kHz: the same capture offset to
+  start at 0 and 40002 s played, at 50002 s and its original 59670 s it was silent, with the renderer
+  rendering and the clock at 1.00 throughout. `RendererTimeline` now latches an origin at the
+  session's first stamp and moves only what the renderers and the synchronizer see; the clock the
+  host reads, the playhead, subtitles, frame times and `softwarePresentationTimebase` stay on the
+  source axis. A source that starts within three hours of zero keeps origin 0 and the stamps it had.
+  A later one starts its renderers at 10800 s, which leaves about 9.4 hours of forward play and three
+  hours of seeking back before the stamps leave the safe range. (#395)
+
+## [7.33.0] - 2026-10-09
+
+### Fixed
+
+- **A stream-copied Dolby Atmos track is declared as object audio in the master playlist.** The
+  loopback master's `EXT-X-MEDIA:TYPE=AUDIO` tag carried no `CHANNELS` attribute at all. Apple's HLS
+  Authoring Specification makes it required on every audio rendition, and for Dolby Digital Plus with
+  Joint Object Coding it is the only playlist-level statement that the rendition carries objects, since
+  `CODECS` stays `ec-3` for JOC and non-JOC alike (#34) and the `dec3` box is a layer below. With
+  nothing above the segments saying "object audio", AVFoundation settled on the bed and an Atmos
+  bitstream that had been stream-copied intact reached an Atmos-capable receiver as 5.1 PCM. The
+  engine already knew: `HLSVideoEngine` latches the E-AC-3 `profile == 30` verdict and logs
+  `EAC3+JOC Atmos: stream-copy engaged`, and nothing carried that up to the playlist builder. The
+  rendition is now advertised `CHANNELS="16/JOC"` when the JOC bitstream actually reached the
+  segments, and with its served bed count otherwise. The JOC form is gated on the delivery being a
+  stream copy as well as on the probe, so a JOC source that fell back to the audio bridge claims
+  only the channels it still has, and the count is read from the codec parameters the muxer was
+  given rather than the source's. `CODECS` and the `EXT-X-STREAM-INF` line are byte-identical
+  before and after. (PR #727, thanks to @kdorepos.)
+- **An untagged Atmos track gets its `CHANNELS="16/JOC"` too.** The rendition, and with it `CHANNELS`,
+  was only written for audio with a resolvable language (AE#458), so an `und` or untagged JOC track,
+  Dolby's own test signals among them, still reached the master without a word about objects. A
+  stream-copied JOC track now gets a rendition without `LANGUAGE` (`NAME="Dolby Atmos"`), which forces
+  the master on an SDR source the way a language does. AVFoundation lists it as one option named
+  "Unknown" where it built no audible group before. An untagged track that is not object audio is
+  unchanged. The AE#458 audible readback line reports such a session as `served=untagged`. (AE#726)
+- **A Blu-ray style Atmos track is described as Atmos in the init segment.** For a Dolby Digital
+  Plus track whose height channels and objects live in a dependent substream (an AC-3 core followed
+  by an E-AC-3 dependent frame), FFmpeg's mp4 muxer wrote a `dec3` box that described a bare 5.1
+  bed: `chan_loc` 0 and no ETSI TS 103 420 JOC extension, so tvOS decoded the core and an Atmos
+  receiver reported multichannel PCM. Fixed in the muxer itself through FFmpegBuild 3.7.0, which
+  backports upstream `f10fdd6310` for `chan_loc` and keeps `complexity_index_type_a` from the
+  dependent substream; the box for the reported source goes from `14 00 0C 0F 02 00` to
+  `14 00 0C 0F 02 40 01 10`. A track whose objects sit in the independent substream is unchanged.
+  `docs/formats.md` no longer claims AVPlayer recognises JOC from `numDepSub` / `depChanLoc`.
+  (AE#728, diagnosis and measurements by @kdorepos in PR #729.)
+
+### Tests and CI
+
+- **Every wait in the suite now follows the rule in `TestWaiting.swift`.** An audit of 79 test files found around 80 places where a step that has to happen carried a wall-clock bound of its own (`waitFor(upTo:)`, hand-rolled `Date()` loops, short semaphore and XCTest timeouts) or a fixed sleep stood in for an observable state, the pattern behind four of the five CI flakes fixed in 7.32.3. Those now wait unbounded under a `.timeLimit`, or wait for the state itself; sync helpers that cannot await keep a generous bound. `try?` around loop sleeps became `try`. Bounds that are the assertion (must not happen within n seconds) stay, and latency assertions that are the point of their test stay with their margin unchanged.
+- **`SourceOpenRecoveryTests` "exhausted opening budget" can no longer hang.** It waited unbounded for the open's retry to reach the origin, but the reader cancels that retry `sizeProbeTimeout` after resuming it, and on a loaded machine it can be cancelled before it is on the wire. The retry now gets a grace and the verdict is the ceiling (no third request).
+- **`Issue93SlowSegmentServeTests`' raw GET reads to the end of the response** (Content-Length or the chunked terminator) instead of to one second of silence on a keep-alive connection, which left the slow-body test 0.15 s of margin.
+
+## [7.32.3] - 2026-10-08
+
+### Fixed
+
+- **The delivery-gap watchdog no longer cuts the open's first byte short.** `open()` waits for its first byte within `SourceOpenPolicy.firstByteTimeout` (and the retry within `sizeProbeTimeout`), but the #309 watchdog ended that same request once `connStallTimeout` had passed without data, and the retry the same way, so the open failed with `noResponse` at the stall threshold. With the defaults (stall 20 s, first byte 15 s) the open's budget ran out first, so this only reached a host that sets a longer first-byte budget than 20 s, for an origin that is slow to answer. The generation the open is waiting on is now left to the open's budget; every later generation, including one that never sees a first byte, is still ended at the threshold.
+
+### Tests and CI
+
+- Two CI flakes on `main` traced to their timing assumptions, both reproduced on demand. #309's detection test opened with a 0.6 s stall threshold, so a first byte slower than that on a loaded runner failed the open (the watchdog fix above; measured 0.4 s opened, 0.8 s failed), and it gave positive events it needed fixed deadlines (10 s, 5 s), which a loaded runner spent. Those waits now follow the suite's rule: a step that has to happen gets no deadline, the test's `.timeLimit` catches a hang. #377's idle-refill test slept a fixed 8 s for a paused budget that only starts once the window is full, so a slow fill kept the connection alive (`asks == [0]`, reproduced with a 2.5 MB/s origin); it now waits for the end itself, and reads `asks[1]` only behind `#require`, since the trap took the whole test process and every buffered result with it.
+- `StreamingBufferTrimTests` asked for two chunks kept after the first trim, which depends on how URLSession cuts the body; a loaded machine coalesces it, leaves one, and the run went red. One kept chunk carries the same address check.
+- `RemoteDiscSessionReleaseTests` proved that the open reached the origin by the sockets open at that instant, which URLSession had already released on a CI runner; it counts accepted connections, as its sibling test does.
+- The AE#711 still fixture deadlocked its own `AVAssetWriter` on CI: the writer stopped taking video until audio caught up, and the audio track's `requestMediaDataWhenReady` block was never called again (`video 88/120 ready=false, audio 21/40 ready=true`, the audio block called once in total). One loop now feeds both tracks whenever each is ready and never waits on either, so nothing depends on AVFoundation re-invoking a block. Its failure now says where each track stood.
+
+## [7.32.2] - 2026-10-08
+
+### Fixed
+
+- **A software resume on a long-GOP source starts where it was asked to (#724).** `load(url:startPosition:)` repositions to the keyframe before the target, so the first decoded audio arrives up to a whole GOP early, and the software host moved its clock back onto that sample: a 17.3 s resume on a 10 s GOP published 9.98 s and played audio under a picture that could not present until 17.3. `SWClockAnchorPolicy` now re-anchors only on a sample AHEAD of the anchor (the mid-stream join it exists for, #107); one behind it is preroll and the anchor stands. A paused resume also kept its position until `play()`: the 4 Hz publisher wrote the still unarmed synchronizer (0) over the anchor. Reported with a synthetic fixture and repeated measurements by @alsoeoe.
+- **A software resume on a source whose timestamps do not start at zero lands on its target.** The resume position is a session-axis value like any seek, but `load()` handed it to the demuxer unconverted, because the session zero only existed once the first sample had arrived: a 17.3 s resume on a source starting at 600 s landed on the first packet (600.0) and published 17.3 over content from the head. The host now carries the source's origin into the resume before the reposition (`SWClockAnchorPolicy.resumeSessionZero`), so the first picture is 617.29 and the position matches the native path's.
+
+## [7.32.1] - 2026-10-08
+
+### Fixed
+
+- **Stopping the loopback server no longer ends a connection it does not own.** `HLSLocalServer.stop()` shut its client connections down after releasing the lock their handlers close under, so a handler could close in between, the process could hand that descriptor number to another socket, and the shutdown ended that socket instead: a source request answered with nothing, or a body cut short. On the process-wide engine that is the next session after a channel zap. The listener had the same race: `stop()` closed it while the accept loop could still call `accept` on the number. Client connections are now shut down under the lock, and the accept loop owns the listener, polls it, and closes it on its way out (`shutdown` does not wake a blocked `accept` on Darwin). `MP4SegmentMuxer`'s init no longer closes its first staging file twice when it throws. The test origins had the listener race eight times over and now share one `LoopbackListener`; it showed up on CI as a different loopback test failing each time (#309's open with no response, a bounded fetch losing its connection, a relayed 429 charged twice).
+
 ## [7.32.0] - 2026-10-08
 
 ### Added

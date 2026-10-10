@@ -1,13 +1,13 @@
 # Downstream engine changes
 
-Date: 2026-10-09. Current base: upstream 7.33.2,
+Date: 2026-10-10. Current base: upstream 7.33.2,
 `e7afcfad3973426a6ffff31fc111f6b1e5078061`.
 
-The current runtime source, package manifest, tests, scripts and engine
-documentation match the upstream 7.33.2 release. All ten downstream contribution
-PRs (#708–#717) are merged upstream and included in this release. The fork now
-retains only this historical modification record and the incorporated GPL text;
-the entries below describe prior revisions.
+The runtime is based on upstream 7.33.2 with the current diagnostic correction
+described below. All ten earlier downstream contribution PRs (#708–#717) are
+merged upstream and included in that release. The fork also retains this
+modification record and the incorporated GPL text. The API and correction
+sections after the current difference describe prior revisions.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM
@@ -16,6 +16,21 @@ Exception in [LICENSE](LICENSE). The incorporated GPL text is supplied in
 Modified source files carry the modification date. These are general engine
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
+
+## Current fork difference: custom-source probe diagnostics
+
+Commit `aef403ae7f80e6f7e253d5a4346acbe81d0c9bb7` (2026-10-10) changes
+`Sources/AetherEngine/AetherEngine.swift` so a failed custom-source probe passes
+its existing `probeFailure` to `publishError(.customSourceProbeFailed, ...)`.
+The host can then read the underlying error domain and numeric code when it
+observes the terminal error state. The probe failure still throws the same
+`DemuxerError.openFailed(code: -1)`; opening, decoding and recovery policy are
+unchanged.
+
+`Tests/AetherEngineTests/PlaybackErrorInfoTests.swift` adds
+`customProbeRetainsCause`, which verifies that an empty custom source publishes
+its cause before the host observes the terminal state. This current correction
+is downstream of upstream 7.33.2; the fork is not byte-identical to that tag.
 
 ## API boundaries
 

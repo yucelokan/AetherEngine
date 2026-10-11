@@ -39,11 +39,13 @@ documentation record the change.
 
 ## Current fork difference: live source recovery continuity
 
-Date: 2026-10-11. Backported from focused commit
-`e98a982cebc5a3fbff3621ae10eb50270823c200` as develop commit
-`3df6d401`. The focused `fix/live-partial-source-replay` branch remains based on
-upstream 7.34.1. No upstream PR has been opened; this revision awaits device
-verification and approval.
+Date: 2026-10-11. The initial continuity change (`3df6d401`, focused
+`e98a982cebc5a3fbff3621ae10eb50270823c200`) was exercised on physical iPhone and
+Apple TV. Those traces exposed damaged-packet mismatches replaying the old prefix
+and exhausted source recovery becoming terminal. The follow-up is focused commit
+`b9cf47a2`, backported as `95d46cfe05f4fa100532a3126e69b3a5460dcf8a`.
+The focused branch remains based on upstream 7.34.1. No upstream PR has been opened;
+the follow-up still requires physical-device verification and approval.
 
 Native HLS source recovery retains the DVR cache and bounded exact timestamp /
 payload history across fresh producers. The failed source connection is cancelled
@@ -55,13 +57,17 @@ than a bridge's converted output. Active recording ends at the source seam.
 `liveSourceReplayExhausted` distinguishes a bounded recovery that cannot find new
 media after verified replay from an ordinary `liveSourceReset`. The host must not
 automatically discard the retained evidence through a full load or decoder switch.
-Cached DVR remains readable; an explicit user retry starts a new session. The
-engine's existing progress-based reopen limits remain in effect. Application retry
+Cached DVR remains readable; `retryLiveSourceRecovery()` resumes acquisition into
+the same cache and consumer item. Concurrent requests coalesce and stop revokes
+them. Short damaged runs within matched overlap are quarantined until both
+tracks cross their admitted frontiers; sustained divergence still fails closed
+after a verified prefix. The existing per-round reopen limits remain in effect. Application retry
 budgets, backoff, provider configuration and UI decisions remain outside the engine.
 
 Changed runtime files: `AetherEngine.swift`, `AetherEngine+Loading.swift`,
 `Video/HLSSegmentProducer.swift`, `Video/HLSVideoEngine.swift`,
-`Video/HLSVideoEngine+LiveReopen.swift`, and `Video/LivePacketReplayGuard.swift`.
+`Video/HLSVideoEngine+LiveReopen.swift`, `Video/VideoSegmentProvider.swift`,
+and `Video/LivePacketReplayGuard.swift`.
 Encoded MPEG-TS tests exercise repeated reconnects without duplicate cached media,
 plus short overlap, source-layout changes, reader cancellation, stale callbacks and
 separate exhaustion delivery. `CHANGELOG.md`, `docs/api.md` and

@@ -1,9 +1,9 @@
 # Downstream engine changes
 
-Date: 2026-10-11. Current base: upstream 7.33.2,
-`e7afcfad3973426a6ffff31fc111f6b1e5078061`.
+Date: 2026-10-11. Current base: upstream 7.34.1,
+`cc070bf8d7bd7004547283cf1dc0c70ccd00d616`.
 
-The runtime is based on upstream 7.33.2 with the diagnostic and live replay corrections
+The runtime is based on upstream 7.34.1 with the diagnostic and live replay corrections
 described below. All ten earlier downstream contribution PRs (#708–#717) are
 merged upstream and included in that release. The fork also retains this
 modification record and the incorporated GPL text. The API and correction
@@ -53,7 +53,7 @@ unchanged.
 `Tests/AetherEngineTests/PlaybackErrorInfoTests.swift` adds
 `customProbeRetainsCause`, which verifies that an empty custom source publishes
 its cause before the host observes the terminal state. This current correction
-is downstream of upstream 7.33.2; the fork is not byte-identical to that tag.
+is downstream of upstream 7.34.1; the fork is not byte-identical to that tag.
 
 ## API boundaries
 

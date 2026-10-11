@@ -68,6 +68,8 @@ struct LivePacketReplayGuard {
         var lastAudioSeconds: Double?
         var unmatchedVideo = 0
         var unmatchedAudio = 0
+        var firstUnmatchedVideoSeconds: Double?
+        var firstUnmatchedAudioSeconds: Double?
         var containsUnmatchedPackets = false
     }
 
@@ -87,6 +89,12 @@ struct LivePacketReplayGuard {
 
     var isDroppingReplay: Bool { overlap != nil }
     var historyEntryCount: Int { entries.count - firstEntry }
+
+    /// Untimed corrupt packets provide no proof. A completed scan containing one must
+    /// still establish distinct exact matches on every participating track.
+    mutating func noteDamagedPacket() {
+        overlap?.containsUnmatchedPackets = true
+    }
 
     /// One common packet is not proof: each participating track must span the rollback trigger.
     /// Full overlap still completes in place; this evidence only prevents an interrupted scan
@@ -160,14 +168,21 @@ struct LivePacketReplayGuard {
             guard frontier != Int64.min,
                   (Double(frontier) - Double(signature.dts)) * timeBaseSeconds
                     >= (isSourceContinuation ? 0 : Self.backwardTriggerSeconds),
-                  signatureCounts[signature] != nil else {
+                  signatureCounts[signature] != nil || entries[firstEntry...].contains(where: {
+                      $0.signature.stream == signature.stream && $0.signature.dts == signature.dts
+                          && $0.signature.pts == signature.pts
+                  }) else {
                 return Decision(drop: false, event: nil)
             }
             let requiresAudioMatch = hasAudio || audioFrontier != Int64.min
             overlap = Overlap(videoFrontier: videoFrontier, audioFrontier: audioFrontier,
                               requiresAudioMatch: requiresAudioMatch,
                               videoFinished: false, audioFinished: !requiresAudioMatch)
-            return dropMatched(signature, sourceSeconds: sourceSeconds, event: .began)
+            if signatureCounts[signature] != nil {
+                return dropMatched(signature, sourceSeconds: sourceSeconds, event: .began)
+            }
+            // The very first returning packet can itself be damaged. Matching timestamps
+            // only open a bounded quarantine; later exact evidence must prove the replay.
         }
 
         var current = overlap!
@@ -182,11 +197,21 @@ struct LivePacketReplayGuard {
             guard signatureCounts[signature] != nil else {
                 let lastMatch = signature.stream == .video ? current.lastVideoSeconds : current.lastAudioSeconds
                 let unmatched = signature.stream == .video ? current.unmatchedVideo : current.unmatchedAudio
-                if let lastMatch, sourceSeconds >= lastMatch,
-                   sourceSeconds - lastMatch <= Self.maximumUnmatchedSeconds,
+                // A damaged first PES can precede this track's first exact match. Its own
+                // bounded interval is provisional; completion still needs BOTH tracks' proof.
+                let firstUnmatched = signature.stream == .video
+                    ? current.firstUnmatchedVideoSeconds : current.firstUnmatchedAudioSeconds
+                let anchor = lastMatch ?? firstUnmatched ?? sourceSeconds
+                if sourceSeconds >= anchor,
+                   sourceSeconds - anchor <= Self.maximumUnmatchedSeconds,
                    unmatched < Self.maximumUnmatchedPackets {
-                    if signature.stream == .video { current.unmatchedVideo += 1 }
-                    else { current.unmatchedAudio += 1 }
+                    if signature.stream == .video {
+                        current.unmatchedVideo += 1
+                        if current.firstUnmatchedVideoSeconds == nil { current.firstUnmatchedVideoSeconds = sourceSeconds }
+                    } else {
+                        current.unmatchedAudio += 1
+                        if current.firstUnmatchedAudioSeconds == nil { current.firstUnmatchedAudioSeconds = sourceSeconds }
+                    }
                     let firstGap = !current.containsUnmatchedPackets
                     current.containsUnmatchedPackets = true
                     overlap = current
@@ -232,11 +257,13 @@ struct LivePacketReplayGuard {
         var current = overlap!
         if signature.stream == .video {
             current.unmatchedVideo = 0
+            current.firstUnmatchedVideoSeconds = nil
             current.videoPackets += 1
             if current.firstVideoSeconds == nil { current.firstVideoSeconds = sourceSeconds }
             current.lastVideoSeconds = max(current.lastVideoSeconds ?? sourceSeconds, sourceSeconds)
         } else {
             current.unmatchedAudio = 0
+            current.firstUnmatchedAudioSeconds = nil
             current.audioPackets += 1
             if current.firstAudioSeconds == nil { current.firstAudioSeconds = sourceSeconds }
             current.lastAudioSeconds = max(current.lastAudioSeconds ?? sourceSeconds, sourceSeconds)

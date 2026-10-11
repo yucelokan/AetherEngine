@@ -12,6 +12,14 @@ the public-API contract.
 
 ### Fixed
 
+- **Damaged first packets after a live reconnect:** hold a bounded timestamp
+  candidate even before that track's first exact match. Later payload matches
+  must verify each participating track before any replay is discarded; genuinely
+  different media retains normal discontinuity handling. Corrupt untimed packets
+  inside a verified replay no longer leak into the resumed timeline. Sampled
+  diagnostics distinguish held, discarded and forwarded damaged packets, and
+  native telemetry marks unavailable frame measurements explicitly.
+
 - **Damaged packets inside live replay:** quarantine bounded packet differences
   while verifying an overlap, instead of remuxing its old prefix or repeatedly
   reopening at the same damaged boundary. New media continues on the retained

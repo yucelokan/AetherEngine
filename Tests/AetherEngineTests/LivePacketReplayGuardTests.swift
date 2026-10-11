@@ -3,6 +3,83 @@ import XCTest
 @testable import AetherEngine
 
 final class LivePacketReplayGuardTests: XCTestCase {
+    func testUntimedDamageCannotCompleteReplayUsingOneMatchPerTrack() {
+        var guard_ = LivePacketReplayGuard()
+        for stream in [LivePacketReplayGuard.Stream.video, .audio] {
+            guard_.record(packet(stream, 0), sourceSeconds: 0)
+        }
+        _ = guard_.inspect(packet(.video, 0), sourceSeconds: 0, timeBaseSeconds: 1,
+            videoFrontier: 40, audioFrontier: 40)
+        guard_.noteDamagedPacket()
+        _ = guard_.inspect(packet(.audio, 0), sourceSeconds: 0, timeBaseSeconds: 1,
+            videoFrontier: 40, audioFrontier: 40)
+        _ = guard_.inspect(packet(.video, 41), sourceSeconds: 41, timeBaseSeconds: 1,
+            videoFrontier: 40, audioFrontier: 40)
+        let result = guard_.inspect(packet(.audio, 41), sourceSeconds: 41, timeBaseSeconds: 1,
+            videoFrontier: 40, audioFrontier: 40)
+        XCTAssertEqual(result.event, .mismatch(videoPackets: 1, audioPackets: 1))
+        XCTAssertNil(guard_.confirmedPrefix)
+    }
+
+    func testDamagedFirstPacketOfEitherTrackWaitsForLaterExactEvidence() {
+        for leading in [LivePacketReplayGuard.Stream.video, .audio] {
+            let trailing: LivePacketReplayGuard.Stream = leading == .video ? .audio : .video
+            var guard_ = LivePacketReplayGuard()
+            for tick in 0..<600 {
+                for stream in [leading, trailing] {
+                    guard_.record(packet(stream, Int64(tick)), sourceSeconds: Double(tick) / 25)
+                }
+            }
+            for tick in 0..<3 {
+                _ = guard_.inspect(packet(leading, Int64(tick)), sourceSeconds: Double(tick) / 25,
+                    timeBaseSeconds: 0.04, videoFrontier: 599, audioFrontier: 599)
+            }
+            let first = guard_.inspect(packet(trailing, 0, payload: 0xFF), sourceSeconds: 0,
+                timeBaseSeconds: 0.04, videoFrontier: 599, audioFrontier: 599)
+            XCTAssertEqual(first.event, .quarantined)
+            XCTAssertTrue(first.drop)
+            XCTAssertNil(guard_.confirmedPrefix, "one track cannot establish a paired replay")
+            for tick in 1...600 {
+                for stream in [leading, trailing] {
+                    if stream == leading && tick < 3 { continue }
+                    let result = guard_.inspect(packet(stream, Int64(tick)), sourceSeconds: Double(tick) / 25,
+                        timeBaseSeconds: 0.04, videoFrontier: 599, audioFrontier: 599)
+                    XCTAssertEqual(result.drop, tick < 600)
+                    if tick == 600 && stream == trailing {
+                        guard case .finished = result.event else { return XCTFail("must reach unique media") }
+                    }
+                }
+            }
+        }
+    }
+
+    func testLeadingUnmatchedTrackRemainsBoundedAndCannotCommitWithoutMatching() {
+        var guard_ = LivePacketReplayGuard()
+        for tick in 0..<40 {
+            for stream in [LivePacketReplayGuard.Stream.video, .audio] {
+                guard_.record(packet(stream, Int64(tick)), sourceSeconds: Double(tick) / 25)
+            }
+        }
+        _ = guard_.inspect(packet(.video, 0), sourceSeconds: 0,
+            timeBaseSeconds: 0.04, videoFrontier: 39, audioFrontier: 39)
+        for tick in 0...12 {
+            let result = guard_.inspect(packet(.audio, Int64(tick), payload: 0xFF),
+                sourceSeconds: Double(tick) / 25, timeBaseSeconds: 0.04,
+                videoFrontier: 39, audioFrontier: 39)
+            XCTAssertTrue(result.drop)
+        }
+        var frontier = guard_
+        _ = frontier.inspect(packet(.video, 40), sourceSeconds: 1.6,
+            timeBaseSeconds: 0.04, videoFrontier: 39, audioFrontier: 39)
+        let incomplete = frontier.inspect(packet(.audio, 40), sourceSeconds: 1.6,
+            timeBaseSeconds: 0.04, videoFrontier: 39, audioFrontier: 39)
+        XCTAssertEqual(incomplete.event, .mismatch(videoPackets: 1, audioPackets: 0))
+        let bounded = guard_.inspect(packet(.audio, 13, payload: 0xFF), sourceSeconds: 0.52,
+            timeBaseSeconds: 0.04, videoFrontier: 39, audioFrontier: 39)
+        XCTAssertEqual(bounded.event, .mismatch(videoPackets: 1, audioPackets: 0))
+        XCTAssertNil(guard_.confirmedPrefix)
+    }
+
     func testShortDamagedPacketAfterThreeVideoAndOneAudioMatchesDoesNotReleaseReplay() {
         var guard_ = LivePacketReplayGuard()
         for tick in 0..<600 {
@@ -79,7 +156,11 @@ final class LivePacketReplayGuardTests: XCTestCase {
         var continuation = original.sourceContinuation()
         let newContent = continuation.inspect(packet(.video, 20, payload: 0xFF), sourceSeconds: 20,
             timeBaseSeconds: 1, videoFrontier: 39, audioFrontier: .min)
-        XCTAssertFalse(newContent.drop)
+        XCTAssertTrue(newContent.drop, "a timestamp-only match is provisional")
+        let divergent = continuation.inspect(packet(.video, 21, payload: 0xFF), sourceSeconds: 21,
+            timeBaseSeconds: 1, videoFrontier: 39, audioFrontier: .min)
+        XCTAssertEqual(divergent.event, .mismatch(videoPackets: 0, audioPackets: 0))
+        XCTAssertNil(continuation.confirmedPrefix)
         continuation.reset()
         let seekReplay = continuation.inspect(packet(.video, 20), sourceSeconds: 20,
             timeBaseSeconds: 1, videoFrontier: 39, audioFrontier: .min)
@@ -122,7 +203,7 @@ final class LivePacketReplayGuardTests: XCTestCase {
         XCTAssertFalse(guard_.isDroppingReplay)
     }
 
-    func testClockResetWithNewContentNeverDropsAFrame() {
+    func testClockResetWithNewContentRollsBackItsProvisionalCandidate() {
         var guard_ = LivePacketReplayGuard()
         for tick in 0..<40 {
             guard_.record(packet(.video, Int64(tick)), sourceSeconds: Double(tick))
@@ -130,8 +211,13 @@ final class LivePacketReplayGuardTests: XCTestCase {
         let result = guard_.inspect(packet(.video, 20, payload: 0xFF), sourceSeconds: 20,
                                     timeBaseSeconds: 1, videoFrontier: 39,
                                     audioFrontier: Int64.min)
-        XCTAssertFalse(result.drop)
-        XCTAssertNil(result.event)
+        XCTAssertTrue(result.drop)
+        XCTAssertEqual(result.event, .quarantined)
+        XCTAssertNil(guard_.confirmedPrefix)
+        let next = guard_.inspect(packet(.video, 21, payload: 0xFF), sourceSeconds: 21,
+                                  timeBaseSeconds: 1, videoFrontier: 39, audioFrontier: .min)
+        XCTAssertEqual(next.event, .mismatch(videoPackets: 0, audioPackets: 0))
+        XCTAssertFalse(guard_.isDroppingReplay, "the producer must forward the entire candidate")
     }
 
     func testAudioCanReachTheOverlapBeforeVideo() {

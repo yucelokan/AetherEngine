@@ -564,16 +564,19 @@ The `aetherctl` CLI target (`Sources/aetherctl/`) is documented separately in [d
 ### Exact overlap after a live source reconnect
 
 On the single-demuxer stream-copy path, rollback alone is never treated as proof
-of replay. A candidate packet must match an accepted packet's source DTS, PTS and
-compressed-payload SHA-256 signature. Candidate packets are buffered until both
+of replay. A rollback to a retained packet's DTS/PTS can open a provisional
+candidate even if the first payload differs. Only exact DTS, PTS and compressed-
+payload SHA-256 matches establish replay evidence. Candidate packets are buffered until both
 tracks pass their previously admitted frontier, then old media is removed and
 new media continues on the existing timeline.
 
 A reconnect can truncate a transport/PES packet. Immediately forwarding a whole
 candidate after one mismatch replayed old pictures; immediately reopening after
 that mismatch repeatedly met the same damaged boundary. A short unmatched run
-following an exact match is now quarantined. Both its source-time span and packet
-count are bounded per track. Later exact matches, or crossing that track's old
+including the first packet of either track is quarantined for at most 0.5 seconds
+of source time and 64 unmatched packets per track. Before any exact match on a
+track, the first unmatched timestamp anchors that bound. Untimed packets remain
+under the producer's overall byte/packet limits and source watchdog. Later exact matches, or crossing that track's old
 frontier, complete the interval; discarding a candidate containing gaps also
 requires distinct matching timestamps on every participating track. Prolonged
 divergence, EOF, read failure and scan limits still interrupt a confirmed prefix
@@ -596,3 +599,15 @@ Repeated source loss parks acquisition after the existing bounded reopen budget.
 replacement revokes the pending retry, duplicate requests coalesce, and resumed
 production restores the provider's blocking-reload capability. Application
 backoff and error presentation remain host-owned.
+
+Corrupt packets with usable timestamps can still match identical previously
+accepted bytes: an MPEG-TS continuity flag alone does not invalidate that proof.
+Corrupt packets without a replay signature are held in source order; only a
+completed paired verification discards them. Ambiguous candidates preserve their
+packets. This does not discard arbitrary damaged packets during normal playback
+or reset a decoder on a transport warning. Per-track/action diagnostics log the
+first three corrupt packets and every 64th thereafter, with source timestamps or
+`missing`, never URLs. `forwarded` means the packet reached the normal pump path,
+not that a corrupt picture was displayed. Native `LagDiag` clock progress follows
+the AVPlayer clock; `videoFrames=unavailable` explicitly records that it is not a
+rendered-frame counter, and unavailable drop counts use `-` instead of zero.

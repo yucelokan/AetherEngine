@@ -201,8 +201,8 @@ struct LiveSourceReplayTests {
         #expect(result.packetsWrittenCount == control.packetsWrittenCount)
     }
 
-    @Test("a changed AAC packet inside paired overlap continues without replay")
-    func pairedAudioDivergence() async throws {
+    @Test("changed AAC at the first match or inside paired overlap continues without replay", arguments: [0, 150])
+    func pairedAudioDivergence(packetIndex: Int) async throws {
         let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
         var replay = clip.replay
         let adts = Data([0xFF, 0xF1, 0x4C])
@@ -212,11 +212,44 @@ struct LiveSourceReplayTests {
             offsets.append(range.lowerBound)
             position = range.upperBound
         }
-        let offset = try #require(offsets.dropFirst(150).first)
+        let offset = try #require(offsets.dropFirst(packetIndex).first)
         replay[offset + 2] ^= 0x02 // ADTS private bit: different bytes, same AAC configuration.
         let result = try await run(clip.head + replay + clip.tail, expected: "eof", expectedRebases: 0)
         let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
         #expect(result.packetsWrittenCount == control.packetsWrittenCount)
+    }
+
+    @Test("a different paired programme with reused timestamps preserves every video packet")
+    func differentPairedProgramme() async throws {
+        let clip = try fixture(data: Self.audioVideoFixture(), divergenceFrame: 2,
+                               divergenceFrames: 10, headFrames: 12, replayStartFrame: 2)
+        var changed = clip.diverged
+        var position = 0
+        while let adts = changed.range(of: Data([0xFF, 0xF1, 0x4C]), in: position..<changed.count) {
+            changed[adts.lowerBound + 2] ^= 0x02
+            position = adts.upperBound
+        }
+        let result = try await run(clip.head + changed + clip.tail, expected: "eof", expectedRebases: 1)
+        #expect(result.packetsWrittenCount == 26, "12 initial + 10 changed + 4 trailing pictures")
+    }
+
+    @Test("a corrupt first audio PES is held and discarded only after paired replay is verified")
+    func corruptFirstAudioPES() async throws {
+        let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
+        var replay = clip.replay
+        let adts = try #require(replay.range(of: Data([0xFF, 0xF1, 0x4C])))
+        let pes = try #require(replay.range(of: Data([0, 0, 1, 0xC0]), in: 0..<adts.lowerBound))
+        let lengthOffset = pes.lowerBound + 4
+        let length = Int(replay[lengthOffset]) * 256 + Int(replay[lengthOffset + 1]) + 1
+        replay[lengthOffset] = UInt8(length >> 8)
+        replay[lengthOffset + 1] = UInt8(length & 0xFF) // Truncated PES: one declared byte never arrives.
+        let capture = EngineLogCapture()
+        defer { capture.end() }
+        let result = try await run(clip.head + replay + clip.tail, expected: "eof", expectedRebases: 0)
+        let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
+        #expect(result.packetsWrittenCount == control.packetsWrittenCount)
+        #expect(!capture.matching("live damaged packet: stream=audio action=held").isEmpty)
+        #expect(!capture.matching("live damaged packet: stream=audio action=discarded").isEmpty)
     }
 
     @Test("paired replay interrupted by EOF or read failure never re-enters either timeline")

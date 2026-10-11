@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **An interrupted, verified live replay no longer plays its old prefix again.**
+  Exact overlap still continues in place when both tracks cross their previous
+  frontier. Once matching media spans the rollback-detection interval on each
+  participating track, a divergent packet, read failure, EOF or scan limit now
+  ends the producer as `sourceReplay` and requests a fresh session through
+  `liveSourceReset`; it never remuxes that prefix as new media. Short or
+  single-track evidence on an A/V source remains ambiguous and keeps the normal
+  discontinuity path. Covers encoded H.264/AAC and video-only MPEG-TS replay,
+  interrupted scans, nested rollback and genuine clock-reset regression cases.
 
 ## [7.33.2] - 2026-10-09
 

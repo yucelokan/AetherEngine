@@ -1,21 +1,44 @@
 # Downstream engine changes
 
-Date: 2026-10-10. Current base: upstream 7.33.2,
+Date: 2026-10-11. Current base: upstream 7.33.2,
 `e7afcfad3973426a6ffff31fc111f6b1e5078061`.
 
-The runtime is based on upstream 7.33.2 with the current diagnostic correction
+The runtime is based on upstream 7.33.2 with the diagnostic and live replay corrections
 described below. All ten earlier downstream contribution PRs (#708–#717) are
 merged upstream and included in that release. The fork also retains this
 modification record and the incorporated GPL text. The API and correction
-sections after the current difference describe prior revisions.
+sections after the current differences describe prior revisions.
 The original downstream commit was based on 7.23.2 and is preserved in history.
 
 The changes in this fork remain under the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is supplied in
 [COPYING.GPL3](COPYING.GPL3). Original copyright notices are preserved.
-Modified source files carry the modification date. These are general engine
+This record identifies the modification dates and source files. These are general engine
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
+
+## Current fork difference: interrupted verified live replay
+
+Date: 2026-10-11. Backported from commit
+`34def7cdfb0403fba6cbbc8dd00c6b058d9ab568` on the focused
+`fix/live-partial-source-replay` branch, prepared against upstream 7.34.1.
+An upstream pull request has not been opened; device verification is pending.
+
+`Sources/AetherEngine/Video/LivePacketReplayGuard.swift` requires matching
+timestamp/payload evidence spanning the rollback interval on every configured
+track before treating an interrupted candidate as verified replay.
+`Sources/AetherEngine/Video/HLSSegmentProducer.swift` releases those candidate
+packets and exits as `sourceReplay` rather than remuxing an old prefix after
+divergence, EOF, a read failure or the existing scan bound. Full exact overlap
+still continues in place and ambiguous programme boundaries retain their normal
+handling. Source-reset delivery and its host-owned recovery budget are unchanged.
+
+`Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift` and the
+`liveSourceReset` documentation in `Sources/AetherEngine/AetherEngine.swift`
+describe the broader existing retune contract without assuming an HTTP reconnect.
+The tests cover encoded H.264/AAC and video-only MPEG-TS, matched packet history,
+ambiguous resets, interrupted scans and stale-session delivery. `CHANGELOG.md`,
+`docs/api.md` and `docs/architecture.md` document this correction.
 
 ## Current fork difference: custom-source probe diagnostics
 

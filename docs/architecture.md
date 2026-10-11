@@ -550,9 +550,21 @@ The `aetherctl` CLI target (`Sources/aetherctl/`) is documented separately in [d
 On the single-demuxer stream-copy path, rollback alone is never treated as proof
 of replay. A candidate packet must match an accepted packet's source DTS, PTS and
 compressed-payload SHA-256 signature. Candidate packets are buffered until both
-tracks have passed their previous frontier. A mismatch, read error, EOF or bounded
-history/payload limit forwards the pending packets to ordinary discontinuity
-handling. Bridged audio and separate side-audio sources are excluded.
+tracks have passed their previous frontier, then only exact duplicates are
+removed and the first new media continues on the existing timeline.
+
+A short match remains ambiguous: a mismatch, read error, EOF or scan limit
+returns its pending packets to ordinary discontinuity handling. A prefix is
+verified only after matching media spans the rollback-detection interval on
+each participating track (video alone for a video-only source). If that scan
+is interrupted, forwarding its old prefix would play known media again;
+selectively dropping it could also strand the divergent video inside a GOP or
+separate audio from its video. Instead the producer releases the candidate
+packets and exits as `sourceReplay`, which invokes the existing
+[`liveSourceReset` retune contract](api.md#live-the-retune-request).
+The host owns fresh negotiation and its bounded recovery policy. No unknown
+packet is silently classified as an exact duplicate. Bridged audio and separate
+side-audio sources remain excluded.
 
 The cutter watchdog distinguishes an intentional overlap scan from a stuck cut
 while continuing to detect source starvation. No host API or resource policy is

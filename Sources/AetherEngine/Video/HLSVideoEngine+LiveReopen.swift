@@ -341,9 +341,9 @@ extension HLSVideoEngine {
             // muxerFailed and needsAudioSampleEntryPrime never reach here (their arms above return first).
             return
         case .sourceReplay:
-            // Server restarted stream from beginning (Jellyfin transcode respawn); URL reopen would replay stale content. Delegate to host for fresh negotiation.
+            // The same origin may repeat the bad overlap. Delegate fresh negotiation to the host.
             EngineLog.emit(
-                "[HLSVideoEngine] live source replayed from start after reconnect; "
+                "[HLSVideoEngine] live source repeated previously accepted media; "
                 + "requesting host retune (fresh playback session)",
                 category: .session
             )

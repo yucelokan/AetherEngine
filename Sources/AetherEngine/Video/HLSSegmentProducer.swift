@@ -1270,7 +1270,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         case needsAudioSampleEntryPrime
         /// No AV_PKT_FLAG_KEY video packet within timeout; live only (VOD waits unbounded).
         case keyframeStarvation
-        /// Backward PTS reset to session origin after unplanned reconnect: server replay-from-start, exits terminally.
+        /// Source replay cannot safely continue in place; the host must negotiate a fresh session.
         case sourceReplay
         /// Pump read packets but finalized no segment for stall window (hostile SSAI ad pod wedge).
         case segmentStall
@@ -2796,6 +2796,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         let isDuplicate: Bool
     }
 
+    private struct InterruptedSourceReplay: Error {}
+
     /// Returns next packet in global decode order. Single-demuxer fast path; dual-demuxer yields lower-DTS first.
     /// #93 restart latency: the FIRST read of a producer is timed (one line; info when it exceeded
     /// 1 s), because rrgomes' trace shows exactly that read waiting 19-46 s client-side while a
@@ -2856,14 +2858,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
             } catch {
                 if !replayPending.isEmpty {
                     replayDeferredError = error
-                    rollbackReplayCandidate(reason: "source read failed before overlap was confirmed")
+                    try rollbackReplayCandidate(reason: "source read failed before overlap was confirmed")
                     continue
                 }
                 throw error
             }
             guard let read else {
                 if !replayPending.isEmpty {
-                    rollbackReplayCandidate(reason: "source ended before overlap was confirmed")
+                    try rollbackReplayCandidate(reason: "source ended before overlap was confirmed")
                     continue
                 }
                 return nil
@@ -2873,11 +2875,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 let decision = liveReplayGuard.inspect(
                     sample.signature, sourceSeconds: sample.seconds,
                     timeBaseSeconds: sample.timeBaseSeconds,
-                    videoFrontier: lastVideoSourceDts, audioFrontier: lastAudioSourceDts)
+                    videoFrontier: lastVideoSourceDts, audioFrontier: lastAudioSourceDts,
+                    hasAudio: audioConfig != nil)
                 if case .some(.began) = decision.event {
-                    // No output is committed until both tracks agree that the entire overlap is
-                    // duplicate. If either track diverges, every buffered packet goes through the
-                    // ordinary rebase in its original order; no unverified frame is discarded.
+                    // A complete overlap continues in place. An interrupted, confirmed prefix
+                    // must not be remuxed as new media; ambiguous candidates still lose nothing.
                     noCutWatchdog?.setReplayChecking(true, at: Date())
                     EngineLog.emit(
                         "[HLSSegmentProducer] live source overlap candidate: exact packet match "
@@ -2898,13 +2900,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
                             + "across \(String(format: "%.2f", videoSeconds))s; "
                             + "first new packet continues the existing timeline",
                             category: .session)
-                    case .some(.mismatch(let videoPackets, let audioPackets)):
-                        rollbackReplayCandidate(reason: "track diverged after \(videoPackets) video "
-                            + "+ \(audioPackets) audio matches")
+                    case .some(.mismatch(let videoPackets, let audioPackets)),
+                         .some(.interrupted(let videoPackets, let audioPackets)):
+                        try rollbackReplayCandidate(reason: "track diverged after \(videoPackets) video "
+                            + "+ \(audioPackets) audio matches", divergentStream: sample.signature.stream)
                     default:
                         if replayPendingBytes > Self.maximumReplayPendingBytes
                             || replayPending.count > Self.maximumReplayPendingPackets {
-                            rollbackReplayCandidate(reason: "bounded overlap check reached its limit")
+                            try rollbackReplayCandidate(reason: "bounded overlap check reached its limit")
                         }
                     }
                     continue
@@ -2919,7 +2922,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 replayPendingBytes += max(0, Int(read.packet.pointee.size))
                 if replayPendingBytes > Self.maximumReplayPendingBytes
                     || replayPending.count > Self.maximumReplayPendingPackets {
-                    rollbackReplayCandidate(reason: "bounded overlap check reached its limit")
+                    try rollbackReplayCandidate(reason: "bounded overlap check reached its limit")
                 }
                 continue
             }
@@ -2944,7 +2947,28 @@ final class HLSSegmentProducer: @unchecked Sendable {
         noCutWatchdog?.setReplayChecking(false, at: Date())
     }
 
-    private func rollbackReplayCandidate(reason: String) {
+    private func rollbackReplayCandidate(reason: String,
+                                         divergentStream: LivePacketReplayGuard.Stream? = nil) throws {
+        if let evidence = liveReplayGuard.confirmedPrefix {
+            let code: String = switch reason {
+            case let value where value.hasPrefix("track diverged"): "track_diverged"
+            case "source read failed before overlap was confirmed": "read_failed"
+            case "source ended before overlap was confirmed": "source_ended"
+            case "bounded overlap check reached its limit": "bounded_limit"
+            default: "unknown"
+            }
+            let stream = divergentStream.map { $0 == .video ? "video" : "audio" } ?? "none"
+            EngineLog.emit(
+                "[HLSSegmentProducer] verified live replay interrupted: reason=\(code) stream=\(stream) "
+                + "videoMatches=\(evidence.videoPackets) audioMatches=\(evidence.audioPackets) "
+                + "videoSeconds=\(String(format: "%.2f", evidence.videoSeconds)) "
+                + "audioSeconds=\(String(format: "%.2f", evidence.audioSeconds)); "
+                + "requesting fresh playback session without forwarding overlap",
+                category: .session)
+            freeReplayPackets()
+            liveReplayGuard.reset()
+            throw InterruptedSourceReplay()
+        }
         replayReady.append(contentsOf: replayPending)
         replayPending.removeAll(keepingCapacity: true)
         replayPendingBytes = 0
@@ -4440,6 +4464,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     continue
                 }
             }
+        } catch is InterruptedSourceReplay {
+            exitReason = checkShouldStop() ? .stopRequested : .sourceReplay
         } catch {
             if case DemuxerError.readFailed(let code) = error {
                 lastError = code

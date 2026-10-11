@@ -7,8 +7,8 @@ import Foundation
 /// compressed payload match a packet that this producer already accepted.
 ///
 /// The guard is pump-thread-only. Its history is bounded in both source time and packet count;
-/// it stores digests, never video or audio payloads. A mismatch is always forwarded so the normal
-/// timeline-rebase path can handle a genuine programme boundary without losing new content.
+/// it stores digests, never video or audio payloads. An ambiguous mismatch is forwarded; an
+/// interrupted overlap already confirmed on both tracks requires a fresh source instead.
 struct LivePacketReplayGuard {
     enum Stream: Hashable { case video, audio }
 
@@ -39,6 +39,7 @@ struct LivePacketReplayGuard {
         case began
         case finished(videoPackets: Int, audioPackets: Int, videoSeconds: Double)
         case mismatch(videoPackets: Int, audioPackets: Int)
+        case interrupted(videoPackets: Int, audioPackets: Int)
     }
 
     struct Decision {
@@ -54,17 +55,20 @@ struct LivePacketReplayGuard {
     private struct Overlap {
         let videoFrontier: Int64
         let audioFrontier: Int64
+        let requiresAudioMatch: Bool
         var videoFinished = false
         var audioFinished = false
         var videoPackets = 0
         var audioPackets = 0
         var firstVideoSeconds: Double?
         var lastVideoSeconds: Double?
+        var firstAudioSeconds: Double?
+        var lastAudioSeconds: Double?
     }
 
     private static let historySeconds = 45.0
     private static let maximumEntries = 10_000
-    private static let backwardTriggerSeconds = 1.5
+    private static let backwardTriggerSeconds = HLSSegmentProducer.discontinuityBackwardThresholdSeconds
 
     private var entries: [Entry] = []
     private var firstEntry = 0
@@ -72,6 +76,20 @@ struct LivePacketReplayGuard {
     private var overlap: Overlap?
 
     var isDroppingReplay: Bool { overlap != nil }
+
+    /// One common packet is not proof: each participating track must span the rollback trigger.
+    /// Full overlap still completes in place; this evidence only prevents an interrupted scan
+    /// from replaying its verified prefix through the ordinary discontinuity path.
+    var confirmedPrefix: (videoPackets: Int, audioPackets: Int,
+                          videoSeconds: Double, audioSeconds: Double)? {
+        guard let current = overlap else { return nil }
+        let videoSeconds = (current.lastVideoSeconds ?? 0) - (current.firstVideoSeconds ?? 0)
+        let audioSeconds = (current.lastAudioSeconds ?? 0) - (current.firstAudioSeconds ?? 0)
+        guard videoSeconds >= Self.backwardTriggerSeconds,
+              !current.requiresAudioMatch || audioSeconds >= Self.backwardTriggerSeconds
+        else { return nil }
+        return (current.videoPackets, current.audioPackets, videoSeconds, audioSeconds)
+    }
 
     mutating func reset() {
         entries.removeAll(keepingCapacity: true)
@@ -105,7 +123,8 @@ struct LivePacketReplayGuard {
     }
 
     mutating func inspect(_ signature: Signature, sourceSeconds: Double, timeBaseSeconds: Double,
-                          videoFrontier: Int64, audioFrontier: Int64) -> Decision {
+                          videoFrontier: Int64, audioFrontier: Int64,
+                          hasAudio: Bool = false) -> Decision {
         guard sourceSeconds.isFinite, timeBaseSeconds > 0, signature.dts != Int64.min else {
             return Decision(drop: false, event: nil)
         }
@@ -118,15 +137,27 @@ struct LivePacketReplayGuard {
                   signatureCounts[signature] != nil else {
                 return Decision(drop: false, event: nil)
             }
+            let requiresAudioMatch = hasAudio || audioFrontier != Int64.min
             overlap = Overlap(videoFrontier: videoFrontier, audioFrontier: audioFrontier,
-                              videoFinished: false, audioFinished: audioFrontier == Int64.min)
+                              requiresAudioMatch: requiresAudioMatch,
+                              videoFinished: false, audioFinished: !requiresAudioMatch)
             return dropMatched(signature, sourceSeconds: sourceSeconds, event: .began)
         }
 
         var current = overlap!
         let frontier = signature.stream == .video ? current.videoFrontier : current.audioFrontier
+        if signature.stream == .audio, current.requiresAudioMatch, frontier == Int64.min {
+            // A configured track not admitted yet is not an absent track or replay evidence.
+            overlap = nil
+            return Decision(drop: false, event: .mismatch(
+                videoPackets: current.videoPackets, audioPackets: current.audioPackets))
+        }
         if frontier != Int64.min, signature.dts <= frontier {
             guard signatureCounts[signature] != nil else {
+                if confirmedPrefix != nil {
+                    return Decision(drop: false, event: .interrupted(
+                        videoPackets: current.videoPackets, audioPackets: current.audioPackets))
+                }
                 overlap = nil
                 return Decision(drop: false,
                                 event: .mismatch(videoPackets: current.videoPackets,
@@ -153,9 +184,11 @@ struct LivePacketReplayGuard {
         if signature.stream == .video {
             current.videoPackets += 1
             if current.firstVideoSeconds == nil { current.firstVideoSeconds = sourceSeconds }
-            current.lastVideoSeconds = sourceSeconds
+            current.lastVideoSeconds = max(current.lastVideoSeconds ?? sourceSeconds, sourceSeconds)
         } else {
             current.audioPackets += 1
+            if current.firstAudioSeconds == nil { current.firstAudioSeconds = sourceSeconds }
+            current.lastAudioSeconds = max(current.lastAudioSeconds ?? sourceSeconds, sourceSeconds)
         }
         overlap = current
         return Decision(drop: true, event: event)

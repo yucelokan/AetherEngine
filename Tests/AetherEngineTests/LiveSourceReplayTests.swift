@@ -1,0 +1,223 @@
+import Foundation
+import Testing
+import AetherLibavutil
+@testable import AetherEngine
+
+@Suite("Live source replay", .serialized, .timeLimit(.minutes(1)))
+struct LiveSourceReplayTests {
+    private final class Reader: IOReader, @unchecked Sendable {
+        private let bytes: Data
+        private let failAtEnd: Bool
+        private let lock = NSLock()
+        private var position = 0
+        init(_ bytes: Data, failAtEnd: Bool = false) {
+            self.bytes = bytes
+            self.failAtEnd = failAtEnd
+        }
+        var consumedBytes: Int { lock.withLock { position } }
+        func read(_ buffer: UnsafeMutablePointer<UInt8>?, size: Int32) -> Int32 {
+            guard let buffer, size > 0 else { return -1 }
+            return lock.withLock {
+                let count = min(Int(size), bytes.count - position)
+                guard count > 0 else { return failAtEnd ? -1 : 0 }
+                bytes.withUnsafeBytes { _ = memcpy(buffer, $0.baseAddress! + position, count) }
+                position += count
+                return Int32(count)
+            }
+        }
+        func seek(offset: Int64, whence: Int32) -> Int64 { -1 }
+        func close() {}
+        var discImageProbeEnabled: Bool { false }
+    }
+
+    private final class Result: @unchecked Sendable {
+        private let lock = NSLock()
+        private var exit: HLSSegmentProducer.PumpExitReason?
+        private var rebases = 0
+        func finish(_ reason: HLSSegmentProducer.PumpExitReason) { lock.withLock { exit = reason } }
+        func rebase() { lock.withLock { rebases += 1 } }
+        var reason: HLSSegmentProducer.PumpExitReason? { lock.withLock { exit } }
+        var rebaseCount: Int { lock.withLock { rebases } }
+    }
+
+    /// Split on TS packets carrying a video access-unit delimiter, retaining the original
+    /// compressed frames and source timestamps. Changing an AUD leaves the picture intact.
+    private func fixture(data: Data = TinyTransportStreamFixture.data,
+                         divergenceFrame: Int = 5,
+                         headFrames: Int = 8,
+                         replayStartFrame: Int = 0) throws -> (head: Data, tail: Data,
+                                                              replay: Data, diverged: Data) {
+        let aud = Data([0, 0, 0, 1, 9, 0xF0])
+        var offsets: [Int] = []
+        var position = 0
+        while let range = data.range(of: aud, in: position..<data.count) {
+            offsets.append(range.lowerBound)
+            position = range.upperBound
+        }
+        #expect(offsets.count == 16)
+        let seam = try #require(offsets.dropFirst(headFrames).first) / 188 * 188
+        let head = Data(data[..<seam])
+        let replayStart = replayStartFrame == 0 ? 0 : offsets[replayStartFrame] / 188 * 188
+        let replay = Data(head[replayStart...])
+        var diverged = replay
+        let changedAUD = try #require(offsets.dropFirst(divergenceFrame).first) + 5 - replayStart
+        diverged[changedAUD] = 0xD0
+        return (head, Data(data[seam...]), replay, diverged)
+    }
+
+    private func run(_ bytes: Data, expected: String, expectedRebases: Int,
+                     failAtEnd: Bool = false, mustLeaveUnreadBytes: Bool = false) async throws {
+        let demuxer = Demuxer()
+        let reader = Reader(bytes, failAtEnd: failAtEnd)
+        try demuxer.open(reader: reader, formatHint: "mpegts")
+        let index = demuxer.videoStreamIndex
+        let stream = try #require(demuxer.stream(at: index))
+        var audio: HLSSegmentProducer.AudioConfig?
+        if let stream = demuxer.stream(at: demuxer.audioStreamIndex) {
+            audio = .init(codecpar: UnsafePointer(stream.pointee.codecpar),
+                          timeBase: stream.pointee.time_base,
+                          sourceStreamIndex: demuxer.audioStreamIndex,
+                          inputTimeBase: stream.pointee.time_base,
+                          sourceTimeBase: stream.pointee.time_base,
+                          bridge: nil, stripAacAdts: true)
+        }
+        let cache = SegmentCache(forwardWindow: 32, backwardWindow: 32)
+        let producer = try HLSSegmentProducer(
+            demuxer: demuxer, videoStreamIndex: index,
+            video: .init(codecpar: UnsafePointer(stream.pointee.codecpar),
+                         timeBase: stream.pointee.time_base, codecTagOverride: "avc1"),
+            audio: audio, cache: cache, targetSegmentDurationSeconds: 1,
+            videoFallbackDurationPts: 45_000, desiredFirstVideoTfdtPts: 0,
+            segmentBoundaries: [], isLive: true, bufferAheadSegments: 32)
+        let result = Result()
+        defer {
+            producer.stop()
+            // Cancellation may leave the pump unwinding; its demuxer/cache must stay alive.
+            if result.reason != nil { cache.close() }
+        }
+        producer.onPumpFinished = { result.finish($0) }
+        producer.onLiveTimelineRebase = { _, _ in result.rebase() }
+        producer.onLiveSegmentFinalized = { _, _, _, _ in }
+        producer.start()
+        try await waitFor { result.reason != nil }
+        #expect(result.reason?.description == expected)
+        #expect(result.rebaseCount == expectedRebases,
+                "confirmed old media must never enter the discontinuity/mux path")
+        #expect(cache.count > 0, "the already-produced good media remains available")
+        if mustLeaveUnreadBytes {
+            #expect(reader.consumedBytes < bytes.count, "the packet bound fires before source EOF")
+        }
+    }
+
+    @Test("exact overlap continues without rebasing the output")
+    func exactOverlap() async throws {
+        let clip = try fixture()
+        try await run(clip.head + clip.head + clip.tail, expected: "eof", expectedRebases: 0)
+    }
+
+    @Test("a long exact prefix followed by a different packet requests a fresh source")
+    func divergentOverlapDoesNotReplayItsPrefix() async throws {
+        let clip = try fixture()
+        try await run(clip.head + clip.diverged + clip.tail,
+                      expected: "sourceReplay", expectedRebases: 0)
+    }
+
+    @Test("a source ending inside a long exact overlap never publishes that overlap")
+    func truncatedOverlapDoesNotReplayItsPrefix() async throws {
+        let clip = try fixture()
+        try await run(clip.head + clip.head, expected: "sourceReplay", expectedRebases: 0)
+    }
+
+    @Test("a read failure inside a confirmed overlap requests a fresh source")
+    func failedOverlapDoesNotReplayItsPrefix() async throws {
+        let clip = try fixture()
+        try await run(clip.head + clip.head, expected: "sourceReplay", expectedRebases: 0,
+                      failAtEnd: true)
+    }
+
+    @Test("a repeated overlap exceeding the packet bound never forwards its old media")
+    func boundedOverlapDoesNotReplayItsPrefix() async throws {
+        let clip = try fixture()
+        var bytes = clip.head
+        for _ in 0..<2_000 { bytes.append(clip.head) }
+        try await run(bytes, expected: "sourceReplay", expectedRebases: 0,
+                      mustLeaveUnreadBytes: true)
+    }
+
+    @Test("a short ambiguous match preserves a genuine source clock reset")
+    func ambiguousOverlapKeepsNewMedia() async throws {
+        let clip = try fixture(divergenceFrame: 1)
+        try await run(clip.head + clip.diverged + clip.tail, expected: "eof", expectedRebases: 1)
+    }
+
+    @Test("paired H.264/AAC replay continues only after both tracks finish the overlap")
+    func pairedExactOverlap() async throws {
+        // Leading AAC before the initial video gate was never accepted into replay history.
+        // Replay the played A/V interval, not that unplayed join preroll.
+        let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
+        try await run(clip.head + clip.replay + clip.tail, expected: "eof", expectedRebases: 0)
+    }
+
+    @Test("paired H.264/AAC divergence does not replay video or rebase either track")
+    func pairedDivergentOverlap() async throws {
+        let clip = try fixture(data: Self.audioVideoFixture(), divergenceFrame: 9,
+                               headFrames: 12, replayStartFrame: 2)
+        try await run(clip.head + clip.diverged + clip.tail,
+                      expected: "sourceReplay", expectedRebases: 0)
+    }
+
+    @Test("an AAC packet differing after a paired replay prefix requests fresh negotiation")
+    func pairedAudioDivergence() async throws {
+        let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
+        var replay = clip.replay
+        let adts = Data([0xFF, 0xF1, 0x4C])
+        var offsets: [Int] = []
+        var position = 0
+        while let range = replay.range(of: adts, in: position..<replay.count) {
+            offsets.append(range.lowerBound)
+            position = range.upperBound
+        }
+        let offset = try #require(offsets.dropFirst(150).first)
+        replay[offset + 2] ^= 0x02 // ADTS private bit: different bytes, same AAC configuration.
+        try await run(clip.head + replay + clip.tail, expected: "sourceReplay", expectedRebases: 0)
+    }
+
+    @Test("paired replay interrupted by EOF or read failure never re-enters either timeline")
+    func pairedInterruptedOverlap() async throws {
+        let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
+        for failAtEnd in [false, true] {
+            try await run(clip.head + clip.replay, expected: "sourceReplay", expectedRebases: 0,
+                          failAtEnd: failAtEnd)
+        }
+    }
+
+
+    /// 8 s, 16x16 H.264 Baseline at 2 fps + AAC-LC stereo at 48 kHz, no B-frames.
+    /// Regenerate with the TinyTransportStreamFixture command plus
+    /// `-f lavfi -i anullsrc=r=48000:cl=stereo -t 8 -c:a aac -b:a 16k`, then raw DEFLATE.
+    private static func audioVideoFixture() throws -> Data {
+        let compressed = Data(base64Encoded: [
+            "3VpbbBRVGD7TCxRIhW0pFSvxLLeWS3dnZi+0hSm7FLp9gKTGxCeTZXb2bHfs7s50ZkpbJc2CjeHBYEy8EIzBS/AZjInxwUhV",
+            "vCAieEEwxJQYMSZeSqJvJOt/FpJ2u0nrimH392xy5pw5Z2b/+c/3/9+cLxMJuVaQXdMbiDBJSE7IEeFWdmVfg7CotzdtsoEl",
+            "jzDrgK4xURo52HMuV1klEiIrCDlVn7edCNNk8+mat8pt1D8skX6wvepUc97262SatPBq+XV4Cu/ud18ut3nzlkiYiIv7CRk/",
+            "P879PkVINlvrJot/Vnl3yTSvB3adWfr9kwKsTzXJV6Gbax/nA8kLwksUjotqc7l91/b88t6Nq33vvLj1Cr267vc/RuWgn7ZT",
+            "zbAYlYIBavlkWaYxXyAoBlQY6PPABO++/j2Rdj8NP9oDM+NMg4EewxxLsYRDZVH0tcuiHICTSccxu7zekZERzwE9zoyUmvFE",
+            "BOIyrAEv/ydP0kmnYJ5hOrqRsbuopsZUTRGpxRKKROMsljK0QUXsgh9VM2pqzGa8R9NMiesqtYdj0BKpaY/BdKijVlyRPCJM",
+            "gYqm9VEWj/J78SuilpoZYIoUpFrSMtJqFC6VqGOxVEq3YUbHaEdcc6ChDaWhjjM1/oSRYYosbZUkmlBtJwq2N5j2oG7ChXdu",
+            "MmRGjUTCZvxCJ2nBRTYMpgxjUE1CJzpzzk5BGM+cEGnGyv+NpqdVh5uiZxxmpVSYBOdjqWFLHYtqRtpU80aBfxxL1TNwC5ho",
+            "qXxOwlLTjN9qhOkDSceE1iAbg2FFvtOIpvUMdGyNge2+MLlb5GWYNszNyZvAXWsxO8kXTFM0K0HTMfAnXxHoKAFYCTrEn0AR",
+            "PUFomtyY/FEdVYKd0LAdZip+qpuwOAABWDs/LPSQIpIsIJQdmeja2EaazkTCgiiE4MwZ8udtpF9Rczf3ZqtP3LpG9qoHtKDP",
+            "I3kkUSa7aN3k/R18THj/lntFzf5nHixzJyIIkn3Xfi+9/BdPAXnGfxySx+VT42V4ggXLrNS3rPfmTOoLH6cNJwEz8h3M/JSf",
+            "suQ7tZJwMV8HMOM7XH6P/zvMhIgL8TuBC/E7QcDuJ4Ln+Xsbq7OCsP7NQyW8f7Ajh6vbjr1K6M4sxKq/IFaXXcYUqwG0sRoW",
+            "ggV+r/8Wk9+34fU7CQKvCk+PVjqvuha5inm1owAzy7/BhJlOtJgJkQbEvNqAmFe3OcCrPzx2j2N1VhQ2stdKItaJ+16PZcmh",
+            "oxCrXQWx6voaU6xuRxurYdIB+b0qGKr0/N50VirO7zsKMNP4FSbMKHgxI3QX+L3pEia/70Tr9xBpRMyrjYh5tRP2q1VH15dt",
+            "v7p6/WRp+1Vh6cY2UkenZumRt2O1+SKmWJXQxmqYdHFevVFX6bzaMvHwQnrk6i8xYQavHjlXW2q5gMnveLWlEFmJmFdXIubV",
+            "7cCr1cqvZePVNT9eL227WpPXgZ/KFumRa77AFKuY9cgdwKvVL1ysdF519wwtpEc+dB4TZjDrkU2I83sT4vyu8Pz+29tly+/r",
+            "3hBK3Dc9wPdNrVNFeqT7c0yxiliPnKPprTuHye+INT3SDbxas+dYpfNqa9VzxbzaXfDN1YbPijFToR9gcT0S7TdXIbIKMa+u",
+            "QsyrO4FXa145WDZe3RRzl7hvSvJ904lskR7Z+imm/I5ZjxR5fv9rf6Xn9y2TpxfSIzd9ggkz/x89csvHmPyOWY9sRsyrzYh5",
+            "VQJerd23u2y86nWHS9yvbub7Ve9UkR7ZfhZTrGLWI2Xg1dqTbZXOq1L20kJ6pPcjTJjBq0fO1ZakDzH5HbW29Gyo3KYXljwK",
+            "1uZR4PtgHhT8DQ==",
+        ].joined())!
+        return try (compressed as NSData).decompressed(using: .zlib) as Data
+    }
+}

@@ -85,6 +85,14 @@ The clock stops with it, on both backends: `clock.currentTime` and `clock.source
 player.liveSourceReset            // PassthroughSubject<Void, Never>; subscribe per session
 ```
 
+An interrupted exact replay can also end here without a new HTTP connection:
+the origin may resend an old prefix and then diverge. After each participating
+track has supplied a sustained exact timestamp/payload match, the engine refuses
+to remux that prefix as new media and requests fresh negotiation. A complete
+overlap continues in place; an ambiguous clock reset retains ordinary
+discontinuity handling. A reset ends an active recording; its outcome reports
+`sourceReset` rather than silently splicing the new session into the old file.
+
 Live's counterpart to a terminal `.error`, and a host that plays live has to subscribe. It fires where the session cannot be revived from inside the engine and only a new `load` can: a source restarted from byte 0 (a transcode respawn), a playlist still frozen after the stall ladder's last reload rung (#65), an in-engine reopen transport whose budget is spent (#199). Production is halted before it fires.
 
 Answering it: negotiate a fresh URL and `load` again, or, where the URL is fixed (an IPTV channel), load the same one again. Guard the answer with one retune in flight, a minimum spacing and a bounded count per session, then surface the exhausted case the way a terminal `.error` would be surfaced, because a ladder that ends on a silent `return` leaves the same dead channel behind a counter.

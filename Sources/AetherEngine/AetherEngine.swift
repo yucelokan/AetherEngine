@@ -1468,8 +1468,9 @@ public final class AetherEngine: ObservableObject {
     /// Forwarder; see `clock.behindLiveSeconds`.
     public var behindLiveSeconds: Double { clock.behindLiveSeconds }
 
-    /// Fires when the live source restarted from byte 0 (e.g. a Jellyfin transcode respawn). The engine has
-    /// parked the session; the host must negotiate a fresh transcode URL and call `load`. No replay; subscribe per session.
+    /// Fires when a live session needs fresh negotiation, including a restart from byte 0 or an
+    /// interrupted verified replay. The session is parked; the host must call `load` with a fresh
+    /// source under its bounded retune policy. Subscribe per session.
     public let liveSourceReset = PassthroughSubject<Void, Never>()
 
     /// AE#444 follow-up (Sodalite#104): fires when a resume found the playhead outside the DVR window

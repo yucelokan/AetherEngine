@@ -12,6 +12,12 @@ the public-API contract.
 
 ### Fixed
 
+- **Variable live GOP durations:** when a finalized segment outgrows the sealed
+  target duration, renew the playlist URL on the same source and cache. Retired
+  video/subtitle URLs retain their original timing and omit oversized segments;
+  the replacement item preserves the viewing position and play/pause intent.
+  Media parse failures no longer count as display/HDR rejection evidence.
+
 - **Damaged first packets after a live reconnect:** hold a bounded timestamp
   candidate even before that track's first exact match. Later payload matches
   must verify each participating track before any replay is discarded; genuinely

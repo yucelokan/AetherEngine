@@ -17,6 +17,15 @@ This record identifies the modification dates and source files. These are genera
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
 
+## Current fork difference: cache-hit timing regression coverage
+
+Date: 2026-10-12. The existing slow-serve test incorrectly assumed a cached
+segment always finished before its timer threshold. A gated, cancellable test
+now verifies that delayed cached responses preserve their bytes without
+restarting production. Changed files: `Tests/AetherEngineTests/Issue93SlowSegmentServeTests.swift`,
+`docs/architecture.md` and `CHANGELOG.md`. No runtime source or timeout changes.
+This correction is included in upstream PR #746.
+
 ## Current fork difference: variable-GOP renewal and software replay admission
 
 Date: 2026-10-12. Focused commits `9e941a46` and `b9cbfcab`. Long-GOP segments that outgrow a sealed HLS target duration
@@ -48,8 +57,12 @@ run with a forced transport drop removed a 23.96-second repeated H.264/AAC
 interval, resumed on fresh media, and passed rewind and return-to-live checks.
 While the source repeated old media in real time, playback had to wait for fresh
 packets. Neither run proves uninterrupted playback under arbitrary source loss.
-Physical iPhone
-and Apple TV testing of this iteration and upstream PR approval remain pending.
+The integrated runtime revision `70e0a215` was subsequently tested on a physical
+iPhone (iOS 26.6.1) and Apple TV (tvOS 27.0) on 2026-10-12. Five source
+reconnects discarded repeated media without sampled backward clock movement or
+player restarts; the tester reported smooth playback. These sessions exercised
+native playback. Upstream PRs #745–#748 are open, and all four CI checks on each
+PR passed; maintainer review remains pending.
 
 ## Current fork difference: playback network callback priority
 

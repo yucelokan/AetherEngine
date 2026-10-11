@@ -178,6 +178,11 @@ and prewarm callbacks already return their tickets at completion. Per-origin cap
 FIFO ordering, pacing, cancellation drains and timeout/overcommit policy remain
 unchanged; each session retains its own serial callback ordering.
 
+QoS is not an execution deadline. A VOD segment already in the cache may still
+cross the slow-serve threshold while its serving thread is delayed. Its early
+chunked header remains valid: the response carries the same cached bytes, and
+the notification alone does not restart the producer.
+
 ## Software VOD compressed packet cache
 
 Seekable software VOD read through one of the engine's byte readers has a

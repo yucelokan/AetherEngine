@@ -12,6 +12,7 @@ the public-API contract.
 
 ### Fixed
 
+- **Cached-segment slow-serve regression:** test byte preservation and absence of producer restarts under a deliberately delayed serve, rather than assuming a cache hit always finishes before a wall-clock notification threshold. Runtime behavior is unchanged.
 - **Variable live GOP durations:** when a finalized segment outgrows the sealed
   target duration, renew the playlist URL on the same source and cache. Retired
   video/subtitle URLs retain their original timing and omit oversized segments;

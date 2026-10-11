@@ -1468,10 +1468,17 @@ public final class AetherEngine: ObservableObject {
     /// Forwarder; see `clock.behindLiveSeconds`.
     public var behindLiveSeconds: Double { clock.behindLiveSeconds }
 
-    /// Fires when a live session needs fresh negotiation, including a restart from byte 0 or an
-    /// interrupted verified replay. The session is parked; the host must call `load` with a fresh
-    /// source under its bounded retune policy. Subscribe per session.
+    /// Fires when a live session cannot continue through its bounded in-engine source reopen.
+    /// A verified replay first reopens a supported source while retaining its cache and packet
+    /// history. When fresh negotiation is needed, production is parked and the host must call
+    /// `load` with a fresh source under its bounded retune policy. Subscribe per session.
     public let liveSourceReset = PassthroughSubject<Void, Never>()
+
+    /// Bounded recovery could not find new media after a verified replay. Cached DVR media
+    /// remains readable, but automatic `load` would discard its history and permit the same
+    /// broadcast to play again. The host should surface source unavailability; this is not
+    /// a codec failure. An explicit user retry starts a new session. Subscribe per session.
+    public let liveSourceReplayExhausted = PassthroughSubject<Void, Never>()
 
     /// AE#444 follow-up (Sodalite#104): fires when a resume found the playhead outside the DVR window
     /// and moved it forward.

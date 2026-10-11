@@ -432,6 +432,25 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Pump-thread-only packet history for exact overlap after a live source reconnect.
     private var liveReplayGuard = LivePacketReplayGuard()
+    private var interruptedReplayHistory: LivePacketReplayGuard?
+
+    /// Called only after the predecessor pump finished and before this pump starts.
+    /// Cache continuation owns the admitted frontier, including media not rendered yet;
+    /// that media remains in the retained cache, so it must not be appended a second time.
+    func continueLiveReplayHistory(from predecessor: HLSSegmentProducer) {
+        guard isLive, predecessor.isLive,
+              sourceVideoTimeBase.num == predecessor.sourceVideoTimeBase.num,
+              sourceVideoTimeBase.den == predecessor.sourceVideoTimeBase.den,
+              videoStreamIndex == predecessor.videoStreamIndex,
+              audioConfig?.sourceStreamIndex == predecessor.audioConfig?.sourceStreamIndex,
+              audioConfig?.sourceTimeBase.num == predecessor.audioConfig?.sourceTimeBase.num,
+              audioConfig?.sourceTimeBase.den == predecessor.audioConfig?.sourceTimeBase.den else { return }
+        liveReplayGuard = (predecessor.interruptedReplayHistory ?? predecessor.liveReplayGuard).sourceContinuation()
+        lastVideoSourceDts = predecessor.lastVideoSourceDts
+        lastAudioSourceDts = predecessor.lastAudioSourceDts
+        EngineLog.emit("[HLSSegmentProducer] live source replay history continued: entries=\(liveReplayGuard.historyEntryCount)",
+                       category: .session)
+    }
     private var replayPending: [ReplayBufferedPacket] = []
     private var replayReady: [ReplayBufferedPacket] = []
     private var replayReadyIndex = 0
@@ -2963,9 +2982,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 + "videoMatches=\(evidence.videoPackets) audioMatches=\(evidence.audioPackets) "
                 + "videoSeconds=\(String(format: "%.2f", evidence.videoSeconds)) "
                 + "audioSeconds=\(String(format: "%.2f", evidence.audioSeconds)); "
-                + "requesting fresh playback session without forwarding overlap",
+                + "requesting fresh source without forwarding overlap",
                 category: .session)
             freeReplayPackets()
+            interruptedReplayHistory = liveReplayGuard.sourceContinuation()
             liveReplayGuard.reset()
             throw InterruptedSourceReplay()
         }

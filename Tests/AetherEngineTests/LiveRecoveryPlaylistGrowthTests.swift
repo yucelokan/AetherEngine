@@ -37,6 +37,28 @@ struct LiveRecoveryPlaylistGrowthTests {
         return dem
     }
 
+    /// A fresh broadcast has new source timestamps; replaying the same fixture would
+    /// now correctly be rejected by the retained cache's exact-packet history.
+    private static func nextBroadcast() -> Data {
+        var bytes = TinyTransportStreamFixture.data
+        let pesHeader = Data([0, 0, 1, 0xE0, 0, 0, 0x80, 0x80, 5])
+        var offset = 0
+        while let range = bytes.range(of: pesHeader, in: offset..<bytes.count) {
+            let p = range.upperBound
+            let pts = (UInt64(bytes[p] & 0x0E) << 29) | (UInt64(bytes[p + 1]) << 22)
+                | (UInt64(bytes[p + 2] & 0xFE) << 14) | (UInt64(bytes[p + 3]) << 7)
+                | (UInt64(bytes[p + 4]) >> 1)
+            let next = pts + 8 * 90_000
+            bytes[p] = (bytes[p] & 0xF1) | UInt8((next >> 29) & 0x0E)
+            bytes[p + 1] = UInt8((next >> 22) & 0xFF)
+            bytes[p + 2] = UInt8((next >> 14) & 0xFE) | 1
+            bytes[p + 3] = UInt8((next >> 7) & 0xFF)
+            bytes[p + 4] = UInt8((next << 1) & 0xFE) | 1
+            offset = p + 5
+        }
+        return bytes
+    }
+
     @Test("segments a reopened live producer cuts reach the playlist", .timeLimit(.minutes(1)))
     func reopenedProducerGrowsThePlaylist() async throws {
         let observed = Observed()
@@ -49,7 +71,7 @@ struct LiveRecoveryPlaylistGrowthTests {
             sourceReopenableByURL: false,
             customSourceReopenFactory: {
                 observed.noteReopen()
-                return (reader: TinyTransportStreamFixture.LiveReader(), formatHint: "mpegts")
+                return (reader: TinyTransportStreamFixture.LiveReader(bytes: Self.nextBroadcast()), formatHint: "mpegts")
             })
         observed.watch(engine)
         _ = try engine.start()

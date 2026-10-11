@@ -73,7 +73,7 @@ struct SupersededPumpExitTests {
         codecpar!.pointee.codec_type = AVMEDIA_TYPE_VIDEO
         let recorder = Recorder()
         let engine = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/live.ts"),
-                                    dvModeAvailable: false, isLiveSession: true)
+                                    dvModeAvailable: false, isLiveSession: true, sourceReopenableByURL: false)
         engine.onLiveSourceReset = { recorder.fail() }
         let stale = try makeProducer(codecpar: codecpar!)
         let current = try makeProducer(codecpar: codecpar!)
@@ -85,6 +85,34 @@ struct SupersededPumpExitTests {
         engine.producer = nil
         engine.handlePumpFinished(current, reason: .sourceReplay)
         #expect(recorder.failures == 1, "a torn-down session cannot retune its successor")
+    }
+
+    @Test("verified replay exhaustion cannot silently request a reload that loses its history")
+    func replayExhaustionHasSeparateHostEvidence() throws {
+        var codecpar: UnsafeMutablePointer<AVCodecParameters>? = try #require(avcodec_parameters_alloc())
+        defer { avcodec_parameters_free(&codecpar) }
+        codecpar!.pointee.codec_id = AV_CODEC_ID_H264
+        codecpar!.pointee.codec_type = AVMEDIA_TYPE_VIDEO
+        let resets = Recorder(), rejected = Recorder()
+        let engine = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/live.ts"),
+            dvModeAvailable: false, isLiveSession: true, sourceReopenableByURL: false)
+        engine.onLiveSourceReset = { resets.fail() }
+        engine.onLiveSourceReplayExhausted = { rejected.fail() }
+        let producer = try makeProducer(codecpar: codecpar!)
+        engine.producer = producer
+        engine.handlePumpFinished(producer, reason: .sourceReplay)
+        #expect(rejected.failures == 1)
+        #expect(resets.failures == 0)
+        engine.producer = nil
+        engine.handlePumpFinished(producer, reason: .sourceReplay)
+        #expect(rejected.failures == 1, "a retired source cannot fail its successor")
+
+        engine.liveRecoveryHasVerifiedReplay = true
+        engine.escalateLiveReopenExhaustion(transport: .url)
+        #expect(rejected.failures == 2, "an open failure after verified replay must not bypass history either")
+        #expect(resets.failures == 0)
+        engine.escalateLiveReopenExhaustion(transport: .url, replayRejected: false)
+        #expect(resets.failures == 1, "a changed track layout still requests fresh negotiation")
     }
 
     @Test("the same read error from the session's own producer still reaches the recovery arms")

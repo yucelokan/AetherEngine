@@ -3,6 +3,41 @@ import XCTest
 @testable import AetherEngine
 
 final class LivePacketReplayGuardTests: XCTestCase {
+    func testFreshProducerContinuationRecognizesShortCachedOverlap() {
+        var original = LivePacketReplayGuard()
+        for tick in 0..<40 {
+            original.record(packet(.video, Int64(tick)), sourceSeconds: Double(tick))
+            original.record(packet(.audio, Int64(tick)), sourceSeconds: Double(tick))
+        }
+        var continuation = original.sourceContinuation()
+        original.reset() // the retired producer can free its own state independently
+        for tick in 37..<39 {
+            for stream in [LivePacketReplayGuard.Stream.video, .audio] {
+                let decision = continuation.inspect(packet(stream, Int64(tick)), sourceSeconds: Double(tick),
+                    timeBaseSeconds: 1, videoFrontier: 39, audioFrontier: 39, hasAudio: true)
+                XCTAssertTrue(decision.drop, "cached media must not be appended again after a fresh connection")
+            }
+        }
+        XCTAssertNotNil(continuation.confirmedPrefix)
+        let divergence = continuation.inspect(packet(.video, 39, payload: 0xFF), sourceSeconds: 39,
+            timeBaseSeconds: 1, videoFrontier: 39, audioFrontier: 39, hasAudio: true)
+        XCTAssertEqual(divergence.event, .interrupted(videoPackets: 2, audioPackets: 2))
+    }
+
+    func testContinuationResetAllowsIntentionalSeekAndDifferentContent() {
+        var original = LivePacketReplayGuard()
+        for tick in 0..<40 { original.record(packet(.video, Int64(tick)), sourceSeconds: Double(tick)) }
+        var continuation = original.sourceContinuation()
+        let newContent = continuation.inspect(packet(.video, 20, payload: 0xFF), sourceSeconds: 20,
+            timeBaseSeconds: 1, videoFrontier: 39, audioFrontier: .min)
+        XCTAssertFalse(newContent.drop)
+        continuation.reset()
+        let seekReplay = continuation.inspect(packet(.video, 20), sourceSeconds: 20,
+            timeBaseSeconds: 1, videoFrontier: 39, audioFrontier: .min)
+        XCTAssertFalse(seekReplay.drop)
+        XCTAssertNil(seekReplay.event)
+    }
+
     private func packet(_ stream: LivePacketReplayGuard.Stream, _ tick: Int64,
                         payload: UInt8? = nil) -> LivePacketReplayGuard.Signature {
         .init(stream: stream, dts: tick, pts: tick,

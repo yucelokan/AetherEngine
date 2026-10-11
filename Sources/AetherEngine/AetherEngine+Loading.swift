@@ -1034,6 +1034,20 @@ extension AetherEngine {
                 self.setPresentationAxis(map)
             }
         }
+        session.onLiveSourceReopening = { [weak self, weak session] in
+            self?.hop(for: generation) { [weak self, weak session] in
+                guard let self, let session, self.nativeVideoSession === session else { return }
+                self.endRecordingIfRunning(reason: .sourceReset)
+            }
+        }
+        session.onLiveSourceReplayExhausted = { [weak self, weak session] in
+            self?.hop(for: generation) { [weak self, weak session] in
+                guard let self, let session, self.nativeVideoSession === session else { return }
+                self.noteLiveSourceGivenUp()
+                self.endRecordingIfRunning(reason: .sourceReset)
+                self.liveSourceReplayExhausted.send()
+            }
+        }
         session.onLiveSourceReset = { [weak self, weak session] in
             Task { @MainActor in
                 // Stale session (superseded by a zap) must not retune the current channel.

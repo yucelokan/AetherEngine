@@ -12,12 +12,26 @@ the public-API contract.
 
 ### Fixed
 
+- **Verified live replay exhaustion:** emit `liveSourceReplayExhausted` when bounded
+  recovery cannot reach new media; preserve cached DVR and let hosts report source
+  unavailability without bypassing replay history through an automatic full load.
+
+
+- **Fresh live-source recovery retains DVR and exact replay history.** Supported
+  sources reopen into the same cache after `sourceReplay` instead of forcing a new
+  host session. Fresh producers suppress exact cached overlap, including short
+  joins; seeks and unrelated loads keep independent histories. The failed socket
+  is retired before replacement, and changed codec/time-base layouts require
+  fresh host negotiation. Consecutive barren attempts remain bounded. Active
+  recordings end with `sourceReset` when fresh source negotiation starts.
+
 - **An interrupted, verified live replay no longer plays its old prefix again.**
   Exact overlap still continues in place when both tracks cross their previous
   frontier. Once matching media spans the rollback-detection interval on each
   participating track, a divergent packet, read failure, EOF or scan limit now
-  ends the producer as `sourceReplay` and requests a fresh session through
-  `liveSourceReset`; it never remuxes that prefix as new media. Short or
+  ends the producer as `sourceReplay` and requests a fresh source; it never remuxes
+  that prefix as new media. Unsupported or exhausted source reopens surface
+  through `liveSourceReset`. Short or
   single-track evidence on an A/V source remains ambiguous and keeps the normal
   discontinuity path. Covers encoded H.264/AAC and video-only MPEG-TS replay,
   interrupted scans, nested rollback and genuine clock-reset regression cases.

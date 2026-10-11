@@ -581,15 +581,16 @@ same session and retained cache. Its fresh producer receives a copy of the bound
 accepted-packet history and source frontiers; only this cache-continuation path
 can recognize a short startup overlap. A seek, channel change or independent load
 starts without that history. The old source socket is retired before the new one
-opens. Changed codec/stream time bases or exhausted reopen budgets invoke the
-[`liveSourceReset` retune contract](api.md#live-the-retune-request).
+opens. Changed track layouts or ordinary source loss that exhausts recovery invoke
+the [`liveSourceReset` retune contract](api.md#live-the-retune-request).
+Verified replay exhaustion uses the separate subject described below.
 The host owns fresh negotiation and its bounded recovery policy. No unknown
 packet is silently classified as an exact duplicate. Bridged audio and separate
 side-audio sources remain excluded.
 
 The cutter watchdog distinguishes an intentional overlap scan from a stuck cut
-while continuing to detect source starvation. No host API or resource policy is
-added; the guard and its packet history belong to the producer thread.
+while continuing to detect source starvation. The guard and its packet history
+belong to the producer thread; resource and retry policies remain host-owned.
 
 Verified replay recovery retains the exact admitted-packet history together with
 the native DVR cache. If its bounded attempts cannot find new media,

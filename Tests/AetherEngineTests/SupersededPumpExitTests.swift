@@ -65,6 +65,28 @@ struct SupersededPumpExitTests {
         #expect(recorder.seekSignals == 0)
     }
 
+    @Test("a replay exit retunes only the current producer, never a superseded channel")
+    func replayExitRequiresCurrentProducer() throws {
+        var codecpar: UnsafeMutablePointer<AVCodecParameters>? = try #require(avcodec_parameters_alloc())
+        defer { avcodec_parameters_free(&codecpar) }
+        codecpar!.pointee.codec_id = AV_CODEC_ID_H264
+        codecpar!.pointee.codec_type = AVMEDIA_TYPE_VIDEO
+        let recorder = Recorder()
+        let engine = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent/live.ts"),
+                                    dvModeAvailable: false, isLiveSession: true)
+        engine.onLiveSourceReset = { recorder.fail() }
+        let stale = try makeProducer(codecpar: codecpar!)
+        let current = try makeProducer(codecpar: codecpar!)
+        engine.producer = current
+        engine.handlePumpFinished(stale, reason: .sourceReplay)
+        #expect(recorder.failures == 0)
+        engine.handlePumpFinished(current, reason: .sourceReplay)
+        #expect(recorder.failures == 1, "the current session still requests fresh negotiation")
+        engine.producer = nil
+        engine.handlePumpFinished(current, reason: .sourceReplay)
+        #expect(recorder.failures == 1, "a torn-down session cannot retune its successor")
+    }
+
     @Test("the same read error from the session's own producer still reaches the recovery arms")
     func currentReadErrorIsHandled() throws {
         var codecpar: UnsafeMutablePointer<AVCodecParameters>? = try #require(avcodec_parameters_alloc())

@@ -162,6 +162,22 @@ Routes the host did not ask for:
 
 Branch on this where host behaviour differs per pipeline: who draws subtitles (AVPlayer on the bypass, the host's renderer on loopback and software), and whether a composited PiP overlay is meaningful at all. Observing it also makes the mid-session reroute an event rather than a log line.
 
+## Byte-reader callback scheduling
+
+The AVIO reader, held HTTP transport and prewarm fetcher use independent serial
+user-initiated URLSession delegate queues. These callbacks deliver playback bytes
+and release origin-request tickets needed by foreground demux threads. A semaphore
+wait cannot donate priority to an implicit utility callback queue. Held transport
+work also runs at user-initiated QoS.
+
+Finite AVIO requests release their ticket in the completion callback, before the
+synchronous caller resumes to process its result. A lock-guarded lease makes that
+release idempotent against cancellation, early return and deallocation. Refusal
+responses are charged to the origin before handing its slot to another reader. Persistent
+and prewarm callbacks already return their tickets at completion. Per-origin caps,
+FIFO ordering, pacing, cancellation drains and timeout/overcommit policy remain
+unchanged; each session retains its own serial callback ordering.
+
 ## Software VOD compressed packet cache
 
 Seekable software VOD read through one of the engine's byte readers has a

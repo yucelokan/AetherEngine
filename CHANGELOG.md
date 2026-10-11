@@ -22,6 +22,11 @@ the public-API contract.
   discontinuity path. Covers encoded H.264/AAC and video-only MPEG-TS replay,
   interrupted scans, nested rollback and genuine clock-reset regression cases.
 
+- Foreground demux reads no longer depend on implicit utility-priority AVIO callbacks.
+  Owned reader/prewarm sessions use serial user-initiated delegate queues, and finite
+  requests return their origin slot at network completion. Cancellation and completion
+  share an idempotent lease; origin caps, FIFO admission and retry policy are unchanged.
+
 ## [7.34.1] - 2026-10-11
 
 ### Changed

@@ -3,7 +3,7 @@
 Date: 2026-10-11. Current base: upstream 7.34.1,
 `cc070bf8d7bd7004547283cf1dc0c70ccd00d616`.
 
-The runtime is based on upstream 7.34.1 with the diagnostic and live replay corrections
+The runtime is based on upstream 7.34.1 with the diagnostic, live replay and callback-priority corrections
 described below. All ten earlier downstream contribution PRs (#708–#717) are
 merged upstream and included in that release. The fork also retains this
 modification record and the incorporated GPL text. The API and correction
@@ -16,6 +16,26 @@ Exception in [LICENSE](LICENSE). The incorporated GPL text is supplied in
 This record identifies the modification dates and source files. These are general engine
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
+
+## Current fork difference: playback network callback priority
+
+Date: 2026-10-11. Applied from commit
+`2da38d1f2786b8875fd061411e408dfea8a773fa` on the focused
+`fix/foreground-origin-budget` branch, based on upstream 7.34.1.
+An upstream pull request has not been opened; device verification is pending.
+
+AVIO, held-transport and prewarm sessions use independent serial user-initiated
+delegate queues; held transport work uses the same priority. Finite AVIO requests
+return their origin ticket on completion rather than waiting for the synchronous
+caller to resume. A lock-guarded lease prevents double release during completion,
+cancellation, early return and deallocation. Refusal responses are charged before
+handing the slot to another reader. Origin ceilings, FIFO admission, pacing and
+retry/timeout policy remain unchanged. No public API is added.
+
+`OriginRequestBudgetTests` and `PlaybackNetworkPriorityTests` verify lease
+handoff, racing release, abandoned tickets and actual HTTP completion priority
+when the request is started by a utility thread. The changelog and architecture
+documentation record the change.
 
 ## Current fork difference: interrupted verified live replay
 

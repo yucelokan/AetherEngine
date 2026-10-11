@@ -1,6 +1,6 @@
 # Downstream engine changes
 
-Date: 2026-10-11. Current base: upstream 7.34.1,
+Date: 2026-10-12. Current base: upstream 7.34.1,
 `cc070bf8d7bd7004547283cf1dc0c70ccd00d616`.
 
 The runtime is based on upstream 7.34.1 with the diagnostic, live replay and callback-priority corrections
@@ -44,8 +44,18 @@ Date: 2026-10-11. The initial continuity change (`3df6d401`, focused
 Apple TV. Those traces exposed damaged-packet mismatches replaying the old prefix
 and exhausted source recovery becoming terminal. The follow-up is focused commit
 `b9cf47a2`, backported as `95d46cfe05f4fa100532a3126e69b3a5460dcf8a`.
-The focused branch remains based on upstream 7.34.1. No upstream PR has been opened;
-the follow-up still requires physical-device verification and approval.
+The focused branch remains based on upstream 7.34.1. Subsequent physical iPhone
+and Apple TV traces verified seven removed replay intervals and exposed a damaged
+first-audio-packet boundary. The October 12 correction is focused commit
+`bcfefae61e76d909a5e7fb30b4863ec8d64484fc`, backported as
+`37e4ea87`. It bounds initial timestamp candidates until later exact paired
+matches, preserves genuine programme changes, and discards corrupt unclassified
+A/V packets only after the overlap is verified. Source diagnostics distinguish
+held/discarded/forwarded corruption; native telemetry no longer implies that the
+AVPlayer clock is a rendered-frame counter. The new encoded regressions cover a
+changed first AAC packet, a truncated first audio PES and entirely changed paired
+media with reused timestamps. No upstream PR has been opened; the October 12
+correction still requires physical-device verification and approval.
 
 Native HLS source recovery retains the DVR cache and bounded exact timestamp /
 payload history across fresh producers. The failed source connection is cancelled

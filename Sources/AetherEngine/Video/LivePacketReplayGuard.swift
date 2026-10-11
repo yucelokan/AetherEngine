@@ -11,6 +11,9 @@ import Foundation
 /// interrupted overlap already confirmed on both tracks requires a fresh source instead.
 /// Short damaged runs are quarantined until later exact matches establish the same interval.
 struct LivePacketReplayGuard {
+    static let maximumPendingBytes = 96 * 1_024 * 1_024
+    static let maximumPendingPackets = 10_000
+
     enum Stream: Hashable { case video, audio }
 
     struct Signature: Hashable {
@@ -86,6 +89,8 @@ struct LivePacketReplayGuard {
     private var signatureCounts: [Signature: Int] = [:]
     private var overlap: Overlap?
     private var isSourceContinuation = false
+    private var replayTailVideoFrontier: Int64?
+    private var replayTailAudioFrontier: Int64?
 
     var isDroppingReplay: Bool { overlap != nil }
     var historyEntryCount: Int { entries.count - firstEntry }
@@ -121,6 +126,8 @@ struct LivePacketReplayGuard {
         var result = self
         result.overlap = nil
         result.isSourceContinuation = true
+        result.replayTailVideoFrontier = nil
+        result.replayTailAudioFrontier = nil
         return result
     }
 
@@ -130,6 +137,8 @@ struct LivePacketReplayGuard {
         signatureCounts.removeAll(keepingCapacity: true)
         overlap = nil
         isSourceContinuation = false
+        replayTailVideoFrontier = nil
+        replayTailAudioFrontier = nil
     }
 
     mutating func record(_ signature: Signature, sourceSeconds: Double) {
@@ -165,6 +174,17 @@ struct LivePacketReplayGuard {
 
         if overlap == nil {
             let frontier = signature.stream == .video ? videoFrontier : audioFrontier
+            // A demuxer can release one last duplicate PES after both tracks crossed the
+            // overlap. Keep exact-match protection through a short per-track settling tail.
+            let tail = signature.stream == .video ? replayTailVideoFrontier : replayTailAudioFrontier
+            if let tail {
+                if (Double(signature.dts) - Double(tail)) * timeBaseSeconds > Self.backwardTriggerSeconds {
+                    if signature.stream == .video { replayTailVideoFrontier = nil }
+                    else { replayTailAudioFrontier = nil }
+                } else if signature.dts <= frontier, signatureCounts[signature] != nil {
+                    return Decision(drop: true, event: nil)
+                }
+            }
             guard frontier != Int64.min,
                   (Double(frontier) - Double(signature.dts)) * timeBaseSeconds
                     >= (isSourceContinuation ? 0 : Self.backwardTriggerSeconds),
@@ -242,6 +262,8 @@ struct LivePacketReplayGuard {
                 return Decision(drop: false, event: .mismatch(
                     videoPackets: current.videoPackets, audioPackets: current.audioPackets))
             }
+            replayTailVideoFrontier = current.videoFrontier
+            replayTailAudioFrontier = current.requiresAudioMatch ? current.audioFrontier : nil
             overlap = nil
             isSourceContinuation = false
             return Decision(drop: false, event: .finished(

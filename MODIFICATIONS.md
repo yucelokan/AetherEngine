@@ -17,6 +17,40 @@ This record identifies the modification dates and source files. These are genera
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
 
+## Current fork difference: variable-GOP renewal and software replay admission
+
+Date: 2026-10-12. Focused commits `9e941a46` and `b9cbfcab`. Long-GOP segments that outgrow a sealed HLS target duration
+renew the local playlist URL while retaining the source, cache, position and
+transport intent. Retired video/subtitle playlists keep their target and end
+index. Renewal clears the previous outage latch and cancels obsolete consumer
+recovery tasks. CoreMedia playlist-duration failures are not HDR incompatibility.
+
+Software live playback now checks exact replay before clock folding, recording
+or DVR append. Paired replay completion drops corrupt boundary packets and a
+bounded settling tail removes exact duplicate PES packets released late by the
+demuxer. DVR acquisition yields during cursor repositioning so a returning source
+cannot keep advancing the window through that transition. Interrupted software
+source reads are classified as source loss, not codec failure. No application
+identity, UI policy, provider setting or retry budget is introduced.
+
+Changed runtime files: `AetherEngine.swift`, `AetherEngine+Loading.swift`,
+`Native/NativeAVPlayerHost.swift`, `Native/MasterFallbackDecision.swift`,
+`Native/SoftwarePlaybackHost.swift`, `Network/HLSLocalServer.swift`,
+`Video/HLSVideoEngine.swift`, `Video/VideoSegmentProvider.swift`,
+`Video/HLSSegmentProducer.swift`, `Video/LivePacketReplayGuard.swift` and
+`Video/LiveReplayPacketReader.swift`.
+
+These changes are covered by packet, encoded MPEG-TS, HTTP playlist and reader
+concurrency regressions. A local macOS AVPlayer run with H.264/AAC MPEG-TS and a
+GOP-length increase resumed on the same source/cache without backward clock
+movement or a software fallback; buffering was still observed. A software live
+run with a forced transport drop removed a 23.96-second repeated H.264/AAC
+interval, resumed on fresh media, and passed rewind and return-to-live checks.
+While the source repeated old media in real time, playback had to wait for fresh
+packets. Neither run proves uninterrupted playback under arbitrary source loss.
+Physical iPhone
+and Apple TV testing of this iteration and upstream PR approval remain pending.
+
 ## Current fork difference: playback network callback priority
 
 Date: 2026-10-11. Applied from commit

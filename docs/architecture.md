@@ -602,8 +602,9 @@ backoff and error presentation remain host-owned.
 
 Corrupt packets with usable timestamps can still match identical previously
 accepted bytes: an MPEG-TS continuity flag alone does not invalidate that proof.
-Corrupt packets without a replay signature are held in source order; only a
-completed paired verification discards them. Ambiguous candidates preserve their
+Corrupt packets are held in source order during a candidate; a completed paired
+verification discards damaged boundary packets even when their usable timestamps
+are already past one track's retained frontier. Ambiguous candidates preserve their
 packets. This does not discard arbitrary damaged packets during normal playback
 or reset a decoder on a transport warning. Per-track/action diagnostics log the
 first three corrupt packets and every 64th thereafter, with source timestamps or
@@ -611,6 +612,7 @@ first three corrupt packets and every 64th thereafter, with source timestamps or
 not that a corrupt picture was displayed. Native `LagDiag` clock progress follows
 the AVPlayer clock; `videoFrames=unavailable` explicitly records that it is not a
 rendered-frame counter, and unavailable drop counts use `-` instead of zero.
+
 
 ### Live playlist renewal after a longer GOP
 
@@ -628,3 +630,20 @@ never repeats an already completed startup cushion wait. The change does not
 cut a GOP at a dependent frame or falsify a segment's duration. A consumer item
 replacement can still cause a short interruption; missing source frames cannot
 be reconstructed by this policy.
+
+### Software live replay admission and recovery
+
+`LiveReplayPacketReader` uses the same `LivePacketReplayGuard` before recording,
+clock-discontinuity folding and ring append. Both the DVR reader and the live
+combined loop use it. Quarantine is bounded to 96 MiB and 10,000 packets; EOF,
+read failure, cancellation and explicit positioning release owned packets. A
+verified partial replay is never forwarded as fresh media. An interrupted source
+is surfaced as `liveSourceUnavailable`, leaving retry timing to the consuming
+application rather than treating transport loss as codec incompatibility.
+
+After paired verification, exact matching packets released late by the demuxer
+remain suppressed until each track has advanced beyond the backward-discontinuity
+threshold. This settling tail never discards different compressed bytes solely
+because their timestamps repeat. During a DVR cursor recovery, acquisition waits
+before appending another packet so it cannot evict the target while decoders and
+clocks are being repositioned. Memory/disk retention caps remain in force.

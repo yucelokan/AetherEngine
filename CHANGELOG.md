@@ -17,6 +17,12 @@ the public-API contract.
   video/subtitle URLs retain their original timing and omit oversized segments;
   the replacement item preserves the viewing position and play/pause intent.
   Media parse failures no longer count as display/HDR rejection evidence.
+- **Software live source replay:** apply exact paired-track replay admission before
+  timestamp folding, recording and DVR storage, including live sessions without
+  DVR. A late duplicate PES after verified overlap is suppressed on both playback
+  paths. Verified corrupt boundary packets are discarded even when they carry
+  timestamps. DVR acquisition waits during cursor recovery, and live reader
+  failures are classified as source loss rather than codec incompatibility.
 
 - **Damaged first packets after a live reconnect:** hold a bounded timestamp
   candidate even before that track's first exact match. Later payload matches

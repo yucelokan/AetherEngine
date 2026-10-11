@@ -457,8 +457,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var replayPendingBytes = 0
     private var replayDeferredError: Error?
     private var damagedPacketLogCounts: [String: Int] = [:]
-    private static let maximumReplayPendingBytes = 96 * 1_024 * 1_024
-    private static let maximumReplayPendingPackets = 10_000
+    private static let maximumReplayPendingBytes = LivePacketReplayGuard.maximumPendingBytes
+    private static let maximumReplayPendingPackets = LivePacketReplayGuard.maximumPendingPackets
 
     /// AE#432: last GENUINE source dts per stream and the frame stride learned from it. A repaired
     /// timestamp says nothing about the source's cadence, so it is deliberately not fed back here.
@@ -2898,6 +2898,11 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     timeBaseSeconds: sample.timeBaseSeconds,
                     videoFrontier: lastVideoSourceDts, audioFrontier: lastAudioSourceDts,
                     hasAudio: audioConfig != nil)
+                if decision.drop, !liveReplayGuard.isDroppingReplay, decision.event == nil {
+                    var duplicate: UnsafeMutablePointer<AVPacket>? = read.packet
+                    trackedPacketFree(&duplicate)
+                    continue
+                }
                 if case .some(.began) = decision.event {
                     // A complete overlap continues in place. An interrupted, confirmed prefix
                     // must not be remuxed as new media; ambiguous candidates still lose nothing.
@@ -2986,10 +2991,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private func commitReplayCandidate() {
         for entry in replayPending {
-            // Corrupt untimed PES packets cannot provide a signature. Once both tracks
-            // establish the overlap, do not leak those damaged bytes into the new timeline.
+            // Once both tracks prove the overlap, discard its damaged boundary packets too.
+            // A truncated PES can carry valid timestamps beyond the retained audio frontier.
             let damaged = damagedLivePacketStream(entry.packet, origin: entry.origin) != nil
-            if entry.isDuplicate || (damaged && entry.sample == nil) {
+            if entry.isDuplicate || damaged {
                 if damaged { logDamagedLivePacket(entry.packet, origin: entry.origin, action: "discarded") }
                 var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
                 trackedPacketFree(&packet)

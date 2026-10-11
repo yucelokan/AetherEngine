@@ -68,6 +68,12 @@ player.$state
 
 It is assigned before `state`, so a `$state` sink reads this failure's own info rather than the previous one's, and it is cleared by the state's move away from `.error`, so the two cannot drift. Substring rules over the message instead bucket every non-English device into "other".
 
+Software live source read failures, including an interrupted verified replay,
+report `liveSourceUnavailable` rather than `softwarePipelineFailed`. This is a
+source continuity failure, not evidence that the codec requires a different
+engine. Hosts choose retry timing through their existing live recovery policy.
+The software route's error remains available through `$errorInfo` and `.error`.
+
 ### `.ended` is terminal
 
 `.ended` means the source played to completion, on any backend. It is not a pause at the last frame:

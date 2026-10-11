@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import AetherLibavutil
+import AetherLibavcodec
 @testable import AetherEngine
 
 @Suite("Live source replay", .serialized, .timeLimit(.minutes(1)))
@@ -116,6 +117,88 @@ struct LiveSourceReplayTests {
             #expect(reader.consumedBytes < bytes.count, "the packet bound fires before source EOF")
         }
         return producer
+    }
+
+    private final class AdmissionGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var held = false
+        private var sawHold = false
+        private var reads = 0
+        private var ended = false
+        private var stopped = false
+        func noteRead() { lock.withLock { reads += 1; if reads == 1 { held = true } } }
+        func mayRead() -> Bool { lock.withLock { if held { sawHold = true }; return !held } }
+        func release() { lock.withLock { held = false } }
+        func stop() { lock.withLock { stopped = true; held = false } }
+        func finish() { lock.withLock { ended = true } }
+        var blocked: Bool { lock.withLock { sawHold } }
+        var done: Bool { lock.withLock { ended } }
+        var shouldStop: Bool { lock.withLock { stopped } }
+    }
+
+    @Test("software acquisition cannot evict a cursor while its recovery transition is held")
+    func readerHonoursDVRRecoveryHold() async throws {
+        let demuxer = Demuxer()
+        try demuxer.open(reader: Reader(TinyTransportStreamFixture.data), formatHint: "mpegts")
+        let video = demuxer.videoStreamIndex
+        let tb = try #require(demuxer.stream(at: video)).pointee.time_base
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let ring = try PacketRingBuffer(windowSeconds: 2, scratch: directory)
+        let condition = NSCondition()
+        let gate = AdmissionGate()
+        defer { gate.stop(); condition.withLock { condition.broadcast() } }
+        Thread.detachNewThread {
+            defer { demuxer.close(); gate.finish() }
+            SoftwarePlaybackHost.runLiveReaderLoop(demuxer: demuxer,
+                videoStreamIndex: video, audioStreamIndex: -1, condition: condition, ring: ring,
+                videoTimeBaseSeconds: Double(tb.num) / Double(tb.den), audioTimeBaseSeconds: 0,
+                noteEdge: { _ in gate.noteRead() }, readerMayAdvance: { gate.mayRead() },
+                stopRequested: { gate.shouldStop }, onError: { _ in gate.stop() },
+                onSourceEnded: {})
+        }
+        try await waitFor { gate.blocked || gate.done }
+        #expect(gate.blocked)
+        #expect(ring.seqBounds.first == 0)
+        #expect(ring.seqBounds.end == 1)
+        gate.release(); condition.withLock { condition.broadcast() }
+        try await waitFor { gate.done }
+        #expect(ring.seqBounds.end > 1)
+        ring.close()
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    @Test("software admission removes real H264/AAC replay before the DVR timeline")
+    func softwarePacketAdmission() throws {
+        let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
+        func signatures(_ bytes: Data) throws -> [LivePacketReplayGuard.Signature] {
+            let demuxer = Demuxer()
+            try demuxer.open(reader: Reader(bytes), formatHint: "mpegts", isLive: true)
+            defer { demuxer.close() }
+            let video = demuxer.videoStreamIndex
+            let audio = demuxer.audioStreamIndex
+            let vt = try #require(demuxer.stream(at: video)).pointee.time_base
+            let at = try #require(demuxer.stream(at: audio)).pointee.time_base
+            let filter = LiveReplayPacketReader(videoIndex: video, audioIndex: audio,
+                videoTimeBase: Double(vt.num) / Double(vt.den), audioTimeBase: Double(at.num) / Double(at.den))
+            var result: [LivePacketReplayGuard.Signature] = []
+            while let packet = try filter.read(from: { try demuxer.readPacket() }) {
+                defer { var owned: UnsafeMutablePointer<AVPacket>? = packet; av_packet_free(&owned) }
+                guard packet.pointee.stream_index == video || packet.pointee.stream_index == audio,
+                      let data = packet.pointee.data, packet.pointee.size > 0 else { continue }
+                result.append(.init(stream: packet.pointee.stream_index == video ? .video : .audio,
+                    dts: packet.pointee.dts, pts: packet.pointee.pts,
+                    payload: UnsafeRawBufferPointer(start: data, count: Int(packet.pointee.size))))
+            }
+            return result
+        }
+        let baseline = try signatures(clip.head + clip.tail)
+        let recovered = try signatures(clip.head + clip.replay + clip.tail)
+        // TS/PES interleaving can change at the seam; each decoder must still receive
+        // exactly its original compressed packets, in original per-track order.
+        for track in [LivePacketReplayGuard.Stream.video, .audio] {
+            #expect(recovered.filter { $0.stream == track } == baseline.filter { $0.stream == track })
+        }
     }
 
     @Test("fresh producers keep cached replay history through repeated source recoveries")

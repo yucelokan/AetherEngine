@@ -37,6 +37,36 @@ handoff, racing release, abandoned tickets and actual HTTP completion priority
 when the request is started by a utility thread. The changelog and architecture
 documentation record the change.
 
+## Current fork difference: live source recovery continuity
+
+Date: 2026-10-11. Backported from focused commit
+`e98a982cebc5a3fbff3621ae10eb50270823c200` as develop commit
+`3df6d401`. The focused `fix/live-partial-source-replay` branch remains based on
+upstream 7.34.1. No upstream PR has been opened; this revision awaits device
+verification and approval.
+
+Native HLS source recovery retains the DVR cache and bounded exact timestamp /
+payload history across fresh producers. The failed source connection is cancelled
+before replacement; its codec parameters and counters survive until a validated
+swap. Source video/audio codec, time-base, dimensions, sample-rate and channel-count
+changes require fresh host negotiation. Comparison uses source parameters rather
+than a bridge's converted output. Active recording ends at the source seam.
+
+`liveSourceReplayExhausted` distinguishes a bounded recovery that cannot find new
+media after verified replay from an ordinary `liveSourceReset`. The host must not
+automatically discard the retained evidence through a full load or decoder switch.
+Cached DVR remains readable; an explicit user retry starts a new session. The
+engine's existing progress-based reopen limits remain in effect. Application retry
+budgets, backoff, provider configuration and UI decisions remain outside the engine.
+
+Changed runtime files: `AetherEngine.swift`, `AetherEngine+Loading.swift`,
+`Video/HLSSegmentProducer.swift`, `Video/HLSVideoEngine.swift`,
+`Video/HLSVideoEngine+LiveReopen.swift`, and `Video/LivePacketReplayGuard.swift`.
+Encoded MPEG-TS tests exercise repeated reconnects without duplicate cached media,
+plus short overlap, source-layout changes, reader cancellation, stale callbacks and
+separate exhaustion delivery. `CHANGELOG.md`, `docs/api.md` and
+`docs/architecture.md` document the public contract and bounded-history limits.
+
 ## Current fork difference: interrupted verified live replay
 
 Date: 2026-10-11. Backported from commit
@@ -51,7 +81,8 @@ track before treating an interrupted candidate as verified replay.
 packets and exits as `sourceReplay` rather than remuxing an old prefix after
 divergence, EOF, a read failure or the existing scan bound. Full exact overlap
 still continues in place and ambiguous programme boundaries retain their normal
-handling. Source-reset delivery and its host-owned recovery budget are unchanged.
+handling. The source recovery continuation above extends this initial correction
+without moving host retry policy into the engine.
 
 `Sources/AetherEngine/Video/HLSVideoEngine+LiveReopen.swift` and the
 `liveSourceReset` documentation in `Sources/AetherEngine/AetherEngine.swift`

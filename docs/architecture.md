@@ -566,35 +566,33 @@ The `aetherctl` CLI target (`Sources/aetherctl/`) is documented separately in [d
 On the single-demuxer stream-copy path, rollback alone is never treated as proof
 of replay. A candidate packet must match an accepted packet's source DTS, PTS and
 compressed-payload SHA-256 signature. Candidate packets are buffered until both
-tracks have passed their previous frontier, then only exact duplicates are
-removed and the first new media continues on the existing timeline.
+tracks pass their previously admitted frontier, then old media is removed and
+new media continues on the existing timeline.
 
-A short match remains ambiguous: a mismatch, read error, EOF or scan limit
-returns its pending packets to ordinary discontinuity handling. A prefix is
-verified only after matching media spans the rollback-detection interval on
-each participating track (video alone for a video-only source). If that scan
-is interrupted, forwarding its old prefix would play known media again;
-selectively dropping it could also strand the divergent video inside a GOP or
-separate audio from its video. Instead the producer releases the candidate
-packets and exits as `sourceReplay`. A supported source then reopens inside the
-same session and retained cache. Its fresh producer receives a copy of the bounded
-accepted-packet history and source frontiers; only this cache-continuation path
-can recognize a short startup overlap. A seek, channel change or independent load
-starts without that history. The old source socket is retired before the new one
-opens. Changed track layouts or ordinary source loss that exhausts recovery invoke
-the [`liveSourceReset` retune contract](api.md#live-the-retune-request).
-Verified replay exhaustion uses the separate subject described below.
-The host owns fresh negotiation and its bounded recovery policy. No unknown
-packet is silently classified as an exact duplicate. Bridged audio and separate
-side-audio sources remain excluded.
+A reconnect can truncate a transport/PES packet. Immediately forwarding a whole
+candidate after one mismatch replayed old pictures; immediately reopening after
+that mismatch repeatedly met the same damaged boundary. A short unmatched run
+following an exact match is now quarantined. Both its source-time span and packet
+count are bounded per track. Later exact matches, or crossing that track's old
+frontier, complete the interval; discarding a candidate containing gaps also
+requires distinct matching timestamps on every participating track. Prolonged
+divergence, EOF, read failure and scan limits still interrupt a confirmed prefix
+without forwarding it. A short unconfirmed programme boundary retains normal
+discontinuity handling. A source clock reset with different content is never
+classified as replay solely by its timestamps.
 
-The cutter watchdog distinguishes an intentional overlap scan from a stuck cut
-while continuing to detect source starvation. The guard and its packet history
-belong to the producer thread; resource and retry policies remain host-owned.
+A supported source reopens inside the same cache. Its fresh producer receives the
+bounded accepted-packet history and source frontiers; a seek, channel change or
+independent load starts without that history. The failed socket is retired before
+the replacement opens. Changed track layouts request fresh host negotiation.
+Bridged audio and separate side-audio sources remain excluded from paired replay
+recognition.
 
-Verified replay recovery retains the exact admitted-packet history together with
-the native DVR cache. If its bounded attempts cannot find new media,
-`liveSourceReplayExhausted` identifies that terminal condition separately from
-ordinary source loss: an automatic full load would discard the evidence and allow
-the old broadcast to repeat. New media renews the existing progress-based budget.
-Application retry/backoff and error presentation remain host-owned.
+The cutter watchdog distinguishes a bounded overlap scan from a stuck cut while
+still detecting source starvation. The guard belongs to the producer thread.
+Repeated source loss parks acquisition after the existing bounded reopen budget.
+`liveSourceReplayExhausted` hands the retry timing to the host, which can call
+`retryLiveSourceRecovery()` without replacing the cache or consumer item. Stop or
+replacement revokes the pending retry, duplicate requests coalesce, and resumed
+production restores the provider's blocking-reload capability. Application
+backoff and error presentation remain host-owned.

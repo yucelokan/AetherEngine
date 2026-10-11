@@ -3,6 +3,55 @@ import XCTest
 @testable import AetherEngine
 
 final class LivePacketReplayGuardTests: XCTestCase {
+    func testShortDamagedPacketAfterThreeVideoAndOneAudioMatchesDoesNotReleaseReplay() {
+        var guard_ = LivePacketReplayGuard()
+        for tick in 0..<600 {
+            for stream in [LivePacketReplayGuard.Stream.video, .audio] {
+                guard_.record(packet(stream, Int64(tick)), sourceSeconds: Double(tick) / 25)
+            }
+        }
+        for tick in 0..<3 {
+            _ = guard_.inspect(packet(.video, Int64(tick)), sourceSeconds: Double(tick) / 25,
+                timeBaseSeconds: 0.04, videoFrontier: 599, audioFrontier: 599)
+        }
+        _ = guard_.inspect(packet(.audio, 0), sourceSeconds: 0,
+            timeBaseSeconds: 0.04, videoFrontier: 599, audioFrontier: 599)
+        let damaged = guard_.inspect(packet(.video, 3, payload: 0xFF), sourceSeconds: 0.12,
+            timeBaseSeconds: 0.04, videoFrontier: 599, audioFrontier: 599)
+        XCTAssertTrue(damaged.drop)
+        XCTAssertEqual(damaged.event, .quarantined, "the tvOS trace used to flush the whole old interval here")
+        for tick in 1..<601 {
+            for stream in [LivePacketReplayGuard.Stream.video, .audio] {
+                if stream == .video && tick < 4 { continue }
+                let result = guard_.inspect(packet(stream, Int64(tick)), sourceSeconds: Double(tick) / 25,
+                    timeBaseSeconds: 0.04, videoFrontier: 599, audioFrontier: 599)
+                XCTAssertEqual(result.drop, tick < 600)
+                if tick == 600 && stream == .audio {
+                    guard case .finished = result.event else { return XCTFail("must reach new media") }
+                }
+            }
+        }
+        XCTAssertFalse(guard_.isDroppingReplay)
+    }
+
+    func testDamagedFrontierPacketDoesNotRequireOpeningTheSameReplayAgain() {
+        var guard_ = LivePacketReplayGuard()
+        for tick in 0..<600 {
+            for stream in [LivePacketReplayGuard.Stream.video, .audio] {
+                guard_.record(packet(stream, Int64(tick)), sourceSeconds: Double(tick) / 25)
+            }
+        }
+        for tick in 0..<601 {
+            for stream in [LivePacketReplayGuard.Stream.video, .audio] {
+                let result = guard_.inspect(packet(stream, Int64(tick), payload: tick == 599 ? 0xFF : nil),
+                    sourceSeconds: Double(tick) / 25, timeBaseSeconds: 0.04,
+                    videoFrontier: 599, audioFrontier: 599)
+                XCTAssertEqual(result.drop, tick < 600)
+                if tick < 600 { XCTAssertFalse(result.event == .interrupted(videoPackets: 599, audioPackets: 599)) }
+            }
+        }
+        XCTAssertFalse(guard_.isDroppingReplay)
+    }
     func testFreshProducerContinuationRecognizesShortCachedOverlap() {
         var original = LivePacketReplayGuard()
         for tick in 0..<40 {
@@ -229,8 +278,10 @@ final class LivePacketReplayGuardTests: XCTestCase {
                 timeBaseSeconds: timeBase, videoFrontier: 1_349 * 3_000,
                 audioFrontier: 2_109 * 1_024).drop)
         }
-        let changed = guard_.inspect(packet(.audio, 1_616 * 1_024, payload: 0xFF),
-            sourceSeconds: Double(1_616 * 1_024) / 48_000, timeBaseSeconds: 1 / 48_000,
+        // One changed AAC packet can be a damaged PES boundary. Sustained different audio
+        // beyond the bounded quarantine still requires fresh negotiation.
+        let changed = guard_.inspect(packet(.audio, 1_650 * 1_024, payload: 0xFF),
+            sourceSeconds: Double(1_650 * 1_024) / 48_000, timeBaseSeconds: 1 / 48_000,
             videoFrontier: 1_349 * 3_000, audioFrontier: 2_109 * 1_024)
         XCTAssertEqual(changed.event, .interrupted(videoPackets: 738, audioPackets: 1_147))
         XCTAssertFalse(changed.drop)

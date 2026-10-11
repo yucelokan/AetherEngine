@@ -14,6 +14,7 @@ struct LiveRecoveryPlaylistGrowthTests {
         private weak var _engine: HLSVideoEngine?
         private var _countAtFirstReopen: Int?
         private var _sourceResets = 0
+        private var _allowNewMedia = false
 
         func watch(_ engine: HLSVideoEngine) { lock.withLock { _engine = engine } }
 
@@ -28,6 +29,8 @@ struct LiveRecoveryPlaylistGrowthTests {
 
         var countAtFirstReopen: Int? { lock.withLock { _countAtFirstReopen } }
         var sourceResets: Int { lock.withLock { _sourceResets } }
+        var allowNewMedia: Bool { lock.withLock { _allowNewMedia } }
+        func admitNewMedia() { lock.withLock { _allowNewMedia = true } }
     }
 
     private static func openLiveDemuxer() throws -> Demuxer {
@@ -83,6 +86,37 @@ struct LiveRecoveryPlaylistGrowthTests {
         #expect(beforeLoss > 0, "the first producer never reported a segment")
 
         try await waitFor { (engine.liveSegmentCountSnapshot ?? 0) > beforeLoss }
+    }
+
+    @Test("an exhausted repeated source resumes into the same DVR when new media arrives", .timeLimit(.minutes(1)))
+    func parkedReplayRecoveryResumesWithoutAppendingOldMedia() async throws {
+        let observed = Observed()
+        let engine = HLSVideoEngine(url: URL(string: "aether-custom://source")!,
+            dvModeAvailable: false, isLiveSession: true, liveCutTargetSeconds: 1,
+            preopenedDemuxer: try Self.openLiveDemuxer(), sourceReopenableByURL: false,
+            customSourceReopenFactory: {
+                observed.noteReopen()
+                let bytes = observed.allowNewMedia ? Self.nextBroadcast() : TinyTransportStreamFixture.data
+                return (reader: TinyTransportStreamFixture.LiveReader(bytes: bytes), formatHint: "mpegts")
+            })
+        observed.watch(engine)
+        engine.onLiveSourceReplayExhausted = { observed.noteSourceReset() }
+        _ = try engine.start()
+        defer { engine.stop() }
+        let cache = try #require(engine.cache)
+        let provider = try #require(engine.provider)
+        try await waitFor { observed.sourceResets > 0 }
+        let originalCount = try #require(observed.countAtFirstReopen)
+        #expect(engine.liveSegmentCountSnapshot == originalCount,
+                "every repeated source must leave the admitted timeline unchanged")
+        #expect(provider.liveProductionHalted)
+        observed.admitNewMedia()
+        #expect(engine.retryLiveSourceRecovery())
+        #expect(engine.retryLiveSourceRecovery(), "duplicate host notification coalesces")
+        try await waitFor { (engine.liveSegmentCountSnapshot ?? 0) > originalCount }
+        #expect(engine.cache === cache)
+        #expect(engine.provider === provider)
+        #expect(!provider.liveProductionHalted)
     }
 
     @Test("a producer rebuilt in place reports into the same playlist", .timeLimit(.minutes(1)))

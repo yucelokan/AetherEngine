@@ -12,9 +12,17 @@ the public-API contract.
 
 ### Fixed
 
+- **Damaged packets inside live replay:** quarantine bounded packet differences
+  while verifying an overlap, instead of remuxing its old prefix or repeatedly
+  reopening at the same damaged boundary. New media continues on the retained
+  timeline after both tracks cross their admitted frontiers.
+- **Resumable retained live recovery:** `retryLiveSourceRecovery()` lets hosts
+  resume a parked source with their own backoff while keeping the consumer item,
+  DVR cache and replay evidence. Duplicate calls coalesce; stop revokes retries.
+
 - **Verified live replay exhaustion:** emit `liveSourceReplayExhausted` when bounded
-  recovery cannot reach new media; preserve cached DVR and let hosts report source
-  unavailability without bypassing replay history through an automatic full load.
+  recovery cannot reach new media; preserve cached DVR and let hosts resume source
+  acquisition without bypassing replay history through an automatic full load.
 
 
 - **Fresh live-source recovery retains DVR and exact replay history.** Supported

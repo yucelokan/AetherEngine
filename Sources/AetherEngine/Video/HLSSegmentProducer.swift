@@ -2911,6 +2911,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                                                                sample: sample, isDuplicate: decision.drop))
                     replayPendingBytes += max(0, Int(read.packet.pointee.size))
                     switch decision.event {
+                    case .some(.quarantined):
+                        EngineLog.emit("[HLSSegmentProducer] live overlap quarantined a changed packet; checking the bounded interval before output", category: .session)
                     case .some(.finished(let videoPackets, let audioPackets, let videoSeconds)):
                         commitReplayCandidate()
                         EngineLog.emit(

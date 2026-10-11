@@ -3,12 +3,13 @@ import Foundation
 
 /// Conservatively removes packets that a live origin sends a second time after reconnecting.
 /// Source timestamps alone are not evidence of a replay: an encoder can reset its clock while
-/// continuing with new pictures. A packet is removed only when its source timestamps AND its
-/// compressed payload match a packet that this producer already accepted.
+/// continuing with new pictures. Matching source timestamps AND compressed payloads establish
+/// the overlap; short damaged runs inside that interval stay quarantined until it completes.
 ///
 /// The guard is pump-thread-only. Its history is bounded in both source time and packet count;
 /// it stores digests, never video or audio payloads. An ambiguous mismatch is forwarded; an
 /// interrupted overlap already confirmed on both tracks requires a fresh source instead.
+/// Short damaged runs are quarantined until later exact matches establish the same interval.
 struct LivePacketReplayGuard {
     enum Stream: Hashable { case video, audio }
 
@@ -37,6 +38,7 @@ struct LivePacketReplayGuard {
 
     enum Event: Equatable {
         case began
+        case quarantined
         case finished(videoPackets: Int, audioPackets: Int, videoSeconds: Double)
         case mismatch(videoPackets: Int, audioPackets: Int)
         case interrupted(videoPackets: Int, audioPackets: Int)
@@ -64,11 +66,18 @@ struct LivePacketReplayGuard {
         var lastVideoSeconds: Double?
         var firstAudioSeconds: Double?
         var lastAudioSeconds: Double?
+        var unmatchedVideo = 0
+        var unmatchedAudio = 0
+        var containsUnmatchedPackets = false
     }
 
     private static let historySeconds = 45.0
     private static let maximumEntries = 10_000
     private static let backwardTriggerSeconds = HLSSegmentProducer.discontinuityBackwardThresholdSeconds
+    // A reconnect can truncate a PES packet. Do not mistake one damaged packet for a new
+    // programme, but never scan an unbounded run of different pictures on timestamp alone.
+    private static let maximumUnmatchedSeconds = 0.5
+    private static let maximumUnmatchedPackets = 64
 
     private var entries: [Entry] = []
     private var firstEntry = 0
@@ -171,6 +180,20 @@ struct LivePacketReplayGuard {
         }
         if frontier != Int64.min, signature.dts <= frontier {
             guard signatureCounts[signature] != nil else {
+                let lastMatch = signature.stream == .video ? current.lastVideoSeconds : current.lastAudioSeconds
+                let unmatched = signature.stream == .video ? current.unmatchedVideo : current.unmatchedAudio
+                if let lastMatch, sourceSeconds >= lastMatch,
+                   sourceSeconds - lastMatch <= Self.maximumUnmatchedSeconds,
+                   unmatched < Self.maximumUnmatchedPackets {
+                    if signature.stream == .video { current.unmatchedVideo += 1 }
+                    else { current.unmatchedAudio += 1 }
+                    let firstGap = !current.containsUnmatchedPackets
+                    current.containsUnmatchedPackets = true
+                    overlap = current
+                    // This is only a provisional discard: the producer buffers it until BOTH
+                    // tracks reach their retained frontier with sufficient exact evidence.
+                    return Decision(drop: true, event: firstGap ? .quarantined : nil)
+                }
                 if confirmedPrefix != nil {
                     return Decision(drop: false, event: .interrupted(
                         videoPackets: current.videoPackets, audioPackets: current.audioPackets))
@@ -186,6 +209,14 @@ struct LivePacketReplayGuard {
         if signature.stream == .video { current.videoFinished = true }
         else { current.audioFinished = true }
         if current.videoFinished && current.audioFinished {
+            if current.containsUnmatchedPackets,
+               ((current.lastVideoSeconds ?? 0) <= (current.firstVideoSeconds ?? 0)
+                || (current.requiresAudioMatch
+                    && (current.lastAudioSeconds ?? 0) <= (current.firstAudioSeconds ?? 0))) {
+                overlap = nil
+                return Decision(drop: false, event: .mismatch(
+                    videoPackets: current.videoPackets, audioPackets: current.audioPackets))
+            }
             overlap = nil
             isSourceContinuation = false
             return Decision(drop: false, event: .finished(
@@ -200,10 +231,12 @@ struct LivePacketReplayGuard {
                                       event: Event?) -> Decision {
         var current = overlap!
         if signature.stream == .video {
+            current.unmatchedVideo = 0
             current.videoPackets += 1
             if current.firstVideoSeconds == nil { current.firstVideoSeconds = sourceSeconds }
             current.lastVideoSeconds = max(current.lastVideoSeconds ?? sourceSeconds, sourceSeconds)
         } else {
+            current.unmatchedAudio = 0
             current.audioPackets += 1
             if current.firstAudioSeconds == nil { current.firstAudioSeconds = sourceSeconds }
             current.lastAudioSeconds = max(current.lastAudioSeconds ?? sourceSeconds, sourceSeconds)

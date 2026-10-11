@@ -65,8 +65,11 @@ struct LiveSourceReplayTests {
         return (head, Data(data[seam...]), replay, diverged)
     }
 
+    @discardableResult
     private func run(_ bytes: Data, expected: String, expectedRebases: Int,
-                     failAtEnd: Bool = false, mustLeaveUnreadBytes: Bool = false) async throws {
+                     failAtEnd: Bool = false, mustLeaveUnreadBytes: Bool = false,
+                     retainedCache: SegmentCache? = nil,
+                     predecessor: HLSSegmentProducer? = nil) async throws -> HLSSegmentProducer {
         let demuxer = Demuxer()
         let reader = Reader(bytes, failAtEnd: failAtEnd)
         try demuxer.open(reader: reader, formatHint: "mpegts")
@@ -81,19 +84,21 @@ struct LiveSourceReplayTests {
                           sourceTimeBase: stream.pointee.time_base,
                           bridge: nil, stripAacAdts: true)
         }
-        let cache = SegmentCache(forwardWindow: 32, backwardWindow: 32)
+        let cache = retainedCache ?? SegmentCache(forwardWindow: 32, backwardWindow: 32)
+        let baseIndex = predecessor == nil ? 0 : cache.count
         let producer = try HLSSegmentProducer(
             demuxer: demuxer, videoStreamIndex: index,
             video: .init(codecpar: UnsafePointer(stream.pointee.codecpar),
                          timeBase: stream.pointee.time_base, codecTagOverride: "avc1"),
-            audio: audio, cache: cache, targetSegmentDurationSeconds: 1,
-            videoFallbackDurationPts: 45_000, desiredFirstVideoTfdtPts: 0,
+            audio: audio, cache: cache, baseIndex: baseIndex, targetSegmentDurationSeconds: 1,
+            videoFallbackDurationPts: 45_000, desiredFirstVideoTfdtPts: Int64(baseIndex) * 90_000,
             segmentBoundaries: [], isLive: true, bufferAheadSegments: 32)
+        if let predecessor { producer.continueLiveReplayHistory(from: predecessor) }
         let result = Result()
         defer {
             producer.stop()
             // Cancellation may leave the pump unwinding; its demuxer/cache must stay alive.
-            if result.reason != nil { cache.close() }
+            if result.reason != nil, retainedCache == nil { cache.close() }
         }
         producer.onPumpFinished = { result.finish($0) }
         producer.onLiveTimelineRebase = { _, _ in result.rebase() }
@@ -107,6 +112,29 @@ struct LiveSourceReplayTests {
         if mustLeaveUnreadBytes {
             #expect(reader.consumedBytes < bytes.count, "the packet bound fires before source EOF")
         }
+        return producer
+    }
+
+    @Test("fresh producers keep cached replay history through repeated source recoveries")
+    func freshProducerDoesNotAppendCachedPicturesAgain() async throws {
+        let clip = try fixture()
+        let cache = SegmentCache(forwardWindow: 32, backwardWindow: 32)
+        defer { cache.close() }
+        let first = try await run(clip.head + clip.diverged, expected: "sourceReplay", expectedRebases: 0,
+                                  retainedCache: cache)
+        let retainedSegments = cache.count
+        let second = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0,
+                                   retainedCache: cache, predecessor: first)
+        let control = try await run(clip.tail, expected: "eof", expectedRebases: 0)
+        #expect(second.packetsWrittenCount == control.packetsWrittenCount,
+                "only new media, not the repeated cached prefix, reaches the second muxer")
+        #expect(cache.count > retainedSegments)
+        let beforeThird = cache.count
+        let third = try await run(clip.head + clip.tail, expected: "sourceReplay", expectedRebases: 0,
+                                  retainedCache: cache, predecessor: second)
+        #expect(third.packetsWrittenCount == 0,
+                "a third fresh connection repeating the entire cached broadcast produces nothing")
+        #expect(cache.count == beforeThird, "previous DVR media is retained through repeated source loss")
     }
 
     @Test("exact overlap continues without rebasing the output")

@@ -83,9 +83,9 @@ extension HLSVideoEngine {
         sourceReopenable: Bool
     ) -> Bool {
         switch reason {
-        case .segmentStall, .sourceReplay:
+        case .segmentStall:
             return true
-        case .eof, .readError, .keyframeStarvation:
+        case .sourceReplay, .eof, .readError, .keyframeStarvation:
             return !sourceReopenable
         case .stopRequested, .muxerFailed, .backpressureWedge, .needsAudioSampleEntryPrime:
             // muxerFailed / needsAudioSampleEntryPrime: handleLiveMuxerFailure and the AE#222 arm rebuild
@@ -180,10 +180,11 @@ extension HLSVideoEngine {
     /// cannot drift apart: the decision plus BOTH of its effects. The halt is the half that is easy
     /// to lose, and losing it is what the -15410 zombie is made of; onLiveSourceReset alone (what
     /// the #65 stall ladder publishes) leaves the dead provider still advertising blocking reloads.
-    func escalateLiveReopenExhaustion(transport: LiveReopenTransport) {
+    func escalateLiveReopenExhaustion(transport: LiveReopenTransport, replayRejected: Bool? = nil) {
         guard Self.liveReopenExhaustionEscalatesToHost(transport: transport) else { return }
         provider?.markLiveProductionHalted()
-        onLiveSourceReset?()
+        let rejected = restartLock.withLock { replayRejected ?? liveRecoveryHasVerifiedReplay }
+        notifyLiveSourceReset(replayRejected: rejected)
     }
 
     func handlePumpFinished(_ prod: HLSSegmentProducer,
@@ -341,14 +342,17 @@ extension HLSVideoEngine {
             // muxerFailed and needsAudioSampleEntryPrime never reach here (their arms above return first).
             return
         case .sourceReplay:
-            // The same origin may repeat the bad overlap. Delegate fresh negotiation to the host.
+            if reopenTransport == .none {
+                notifyLiveSourceReset(replayRejected: true)
+                return
+            }
+            // Retaining the cache also retains the already-admitted media. A full host
+            // retune loses that history and can turn a fresh connection into another replay.
             EngineLog.emit(
                 "[HLSVideoEngine] live source repeated previously accepted media; "
-                + "requesting host retune (fresh playback session)",
+                + "reopening source while retaining cache and replay history",
                 category: .session
             )
-            onLiveSourceReset?()
-            return
         case .segmentStall:
             // SSAI ad pod the cutter can't cut through; URL reopen would re-enter it. Delegate to host for server-muxed fallback.
             //
@@ -399,6 +403,11 @@ extension HLSVideoEngine {
             barrenCycles: barrenReopenCycles,
             cap: Self.maxBarrenReopenCycles
         )
+        if case .sourceReplay = reason {
+            liveRecoveryHasVerifiedReplay = true
+        } else if segmentsNow > lastReopenSegmentCount {
+            liveRecoveryHasVerifiedReplay = false
+        }
         barrenReopenCycles = reopenDecision.newBarrenCycles
         lastReopenSegmentCount = segmentsNow
         let barrenNow = reopenDecision.newBarrenCycles
@@ -419,6 +428,7 @@ extension HLSVideoEngine {
             "[HLSVideoEngine] live pump exited (reason=\(reason)); starting reopen",
             category: .session
         )
+        onLiveSourceReopening?()
         BlockingWork.detached(priority: .userInitiated) { [weak self] in
             await self?.performLiveReopen(failedProducer: prod)
         }
@@ -744,8 +754,8 @@ extension HLSVideoEngine {
     /// a frozen playlist, AVPlayer parked on it, and the session zombified until the viewer zapped away.
     /// The connection is healthy (the muxer died, not the socket), so the recovery rebuilds the producer
     /// IN PLACE on the same demuxer and provider at the live continuation point. A reopen is the wrong
-    /// tool here: `performLiveReopen` opens its fresh connection BEFORE closing the old demuxer, which
-    /// double-connects against a healthy socket and breaks single-connection portals.
+    /// tool here: a healthy socket needs no replacement. Source reopens retire their failed
+    /// connection first, but this path can continue producing without any network negotiation.
     func handleLiveMuxerFailure(_ prod: HLSSegmentProducer) {
         restartLock.lock()
         let nextNow = provider?.liveContinuationPoint().nextIndex ?? 0
@@ -970,7 +980,17 @@ extension HLSVideoEngine {
         }
     }
 
+    private func notifyLiveSourceReset(replayRejected: Bool) {
+        if replayRejected, let onLiveSourceReplayExhausted {
+            EngineLog.emit("[HLSVideoEngine] verified live replay recovery exhausted; retained history must not be bypassed by automatic reload", category: .session)
+            onLiveSourceReplayExhausted()
+        } else {
+            onLiveSourceReset?()
+        }
+    }
+
     private func performLiveReopen(failedProducer: HLSSegmentProducer) async {
+        guard retireLiveSourceConnection(failedProducer: failedProducer) else { return }
         let transport = Self.liveReopenTransport(
             sourceReopenableByURL: sourceReopenableByURL,
             hasCustomSourceReopenFactory: customSourceReopenFactory != nil)
@@ -1026,6 +1046,17 @@ extension HLSVideoEngine {
                 freshReader?.close()
                 continue
             }
+            guard reopenedTrackLayoutMatches(dem, failedProducer: failedProducer) else {
+                dem.close()
+                freshReader?.close()
+                // Saved muxer parameters and packet timestamps cannot describe a new layout.
+                if currentProducerIs(failedProducer) {
+                    EngineLog.emit("[HLSVideoEngine] live reopen track layout changed; requesting host negotiation",
+                                   category: .session)
+                    escalateLiveReopenExhaustion(transport: transport, replayRejected: false)
+                }
+                return
+            }
 
             switch finishLiveReopen(failedProducer: failedProducer, dem: dem,
                                     freshReader: freshReader, attempt: attempt) {
@@ -1044,6 +1075,50 @@ extension HLSVideoEngine {
         // factory-less custom source would have immediately, so the host can retune instead of
         // holding a zombie session whose blocking-reload advert can never be satisfied.
         escalateLiveReopenExhaustion(transport: transport)
+    }
+
+    /// Release the failed source's socket/lease BEFORE asking a single-slot origin again.
+    /// markClosed keeps codec parameters and byte counters alive until the validated swap.
+    func retireLiveSourceConnection(failedProducer: HLSSegmentProducer) -> Bool {
+        restartLock.lock()
+        guard producer === failedProducer else { restartLock.unlock(); return false }
+        let failedDemuxer = demuxer
+        restartLock.unlock()
+        failedDemuxer?.markClosed()
+        EngineLog.emit("[HLSVideoEngine] live source connection retired before reopen", category: .session)
+        return true
+    }
+
+    func reopenedTrackLayoutMatches(_ dem: Demuxer, failedProducer: HLSSegmentProducer) -> Bool {
+        restartLock.lock()
+        defer { restartLock.unlock() }
+        guard producer === failedProducer, let previous = demuxer else { return false }
+        // Compare SOURCE parameters. Saved audio codecpar may describe a bridge's AAC/FLAC
+        // output rather than the AC-3/TrueHD source, and TS AAC extradata may be synthesized.
+        let priorVideo = previous.withStream(at: videoStreamIndex) { stream in
+            let codec = stream.pointee.codecpar.pointee
+            return (codec.codec_id, stream.pointee.time_base.num, stream.pointee.time_base.den,
+                    codec.width, codec.height)
+        }
+        let nextVideo = dem.withStream(at: videoStreamIndex) { stream in
+            let codec = stream.pointee.codecpar.pointee
+            return (codec.codec_id, stream.pointee.time_base.num, stream.pointee.time_base.den,
+                    codec.width, codec.height)
+        }
+        guard let priorVideo, let nextVideo, priorVideo == nextVideo else { return false }
+        guard let audio = savedAudioConfig, sideAudioDemuxer == nil else { return true }
+        let priorAudio = previous.withStream(at: audio.sourceStreamIndex) { stream in
+            let codec = stream.pointee.codecpar.pointee
+            return (codec.codec_id, stream.pointee.time_base.num, stream.pointee.time_base.den,
+                    codec.sample_rate, codec.ch_layout.nb_channels)
+        }
+        let nextAudio = dem.withStream(at: audio.sourceStreamIndex) { stream in
+            let codec = stream.pointee.codecpar.pointee
+            return (codec.codec_id, stream.pointee.time_base.num, stream.pointee.time_base.den,
+                    codec.sample_rate, codec.ch_layout.nb_channels)
+        }
+        guard let priorAudio, let nextAudio else { return false }
+        return priorAudio == nextAudio
     }
 
     /// NSLock unavailable from async contexts; this synchronous helper wraps the check.
@@ -1096,6 +1171,7 @@ extension HLSVideoEngine {
                 baseIndex: nextIndex,
                 liveReopenOutputEndSeconds: outputEnd
             )
+            newProd.continueLiveReplayHistory(from: failedProducer)
             // Fresh connection joins the broadcast at "now"; source clock jumps, so the seam carries #EXT-X-DISCONTINUITY. Shift handoff deferred to seam to avoid jumping the host clock while pre-loss content is on screen.
             newProd.firstSegmentDiscontinuous = true
             let newEpoch = newProd.epoch

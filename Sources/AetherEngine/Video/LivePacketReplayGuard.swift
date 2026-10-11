@@ -74,8 +74,10 @@ struct LivePacketReplayGuard {
     private var firstEntry = 0
     private var signatureCounts: [Signature: Int] = [:]
     private var overlap: Overlap?
+    private var isSourceContinuation = false
 
     var isDroppingReplay: Bool { overlap != nil }
+    var historyEntryCount: Int { entries.count - firstEntry }
 
     /// One common packet is not proof: each participating track must span the rollback trigger.
     /// Full overlap still completes in place; this evidence only prevents an interrupted scan
@@ -85,10 +87,24 @@ struct LivePacketReplayGuard {
         guard let current = overlap else { return nil }
         let videoSeconds = (current.lastVideoSeconds ?? 0) - (current.firstVideoSeconds ?? 0)
         let audioSeconds = (current.lastAudioSeconds ?? 0) - (current.firstAudioSeconds ?? 0)
-        guard videoSeconds >= Self.backwardTriggerSeconds,
-              !current.requiresAudioMatch || audioSeconds >= Self.backwardTriggerSeconds
-        else { return nil }
+        if isSourceContinuation {
+            // A fresh producer can join less than the usual rollback threshold behind
+            // cached media. Two exact packets on every participating track prove that prefix.
+            guard current.videoPackets >= 2,
+                  !current.requiresAudioMatch || current.audioPackets >= 2 else { return nil }
+        } else {
+            guard videoSeconds >= Self.backwardTriggerSeconds,
+                  !current.requiresAudioMatch || audioSeconds >= Self.backwardTriggerSeconds else { return nil }
+        }
         return (current.videoPackets, current.audioPackets, videoSeconds, audioSeconds)
+    }
+
+    /// Only for a fresh producer continuing the SAME retained cache, never a seek or new load.
+    func sourceContinuation() -> Self {
+        var result = self
+        result.overlap = nil
+        result.isSourceContinuation = true
+        return result
     }
 
     mutating func reset() {
@@ -96,6 +112,7 @@ struct LivePacketReplayGuard {
         firstEntry = 0
         signatureCounts.removeAll(keepingCapacity: true)
         overlap = nil
+        isSourceContinuation = false
     }
 
     mutating func record(_ signature: Signature, sourceSeconds: Double) {
@@ -133,7 +150,7 @@ struct LivePacketReplayGuard {
             let frontier = signature.stream == .video ? videoFrontier : audioFrontier
             guard frontier != Int64.min,
                   (Double(frontier) - Double(signature.dts)) * timeBaseSeconds
-                    >= Self.backwardTriggerSeconds,
+                    >= (isSourceContinuation ? 0 : Self.backwardTriggerSeconds),
                   signatureCounts[signature] != nil else {
                 return Decision(drop: false, event: nil)
             }
@@ -170,6 +187,7 @@ struct LivePacketReplayGuard {
         else { current.audioFinished = true }
         if current.videoFinished && current.audioFinished {
             overlap = nil
+            isSourceContinuation = false
             return Decision(drop: false, event: .finished(
                 videoPackets: current.videoPackets, audioPackets: current.audioPackets,
                 videoSeconds: max(0, (current.lastVideoSeconds ?? 0) - (current.firstVideoSeconds ?? 0))))

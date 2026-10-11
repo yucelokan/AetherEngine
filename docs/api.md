@@ -85,17 +85,31 @@ The clock stops with it, on both backends: `clock.currentTime` and `clock.source
 player.liveSourceReset            // PassthroughSubject<Void, Never>; subscribe per session
 ```
 
-An interrupted exact replay can also end here without a new HTTP connection:
-the origin may resend an old prefix and then diverge. After each participating
-track has supplied a sustained exact timestamp/payload match, the engine refuses
-to remux that prefix as new media and requests fresh negotiation. A complete
-overlap continues in place; an ambiguous clock reset retains ordinary
-discontinuity handling. A reset ends an active recording; its outcome reports
-`sourceReset` rather than silently splicing the new session into the old file.
+An interrupted exact replay first tries the bounded in-engine source reopen when
+there is a URL or fresh-reader factory. It retains the same cache, player item and
+bounded exact-packet history, so media already in the DVR window is not appended
+again even when the viewer is behind live. The failed connection is retired before
+opening the replacement. A changed codec/stream time base, missing reopen transport
+or exhausted recovery budget requests host negotiation through this subject.
+A complete overlap continues in place; an ambiguous clock reset retains ordinary
+discontinuity handling. Fresh-source recovery ends an active recording with
+`sourceReset` rather than silently splicing a new source into the old file.
 
 Live's counterpart to a terminal `.error`, and a host that plays live has to subscribe. It fires where the session cannot be revived from inside the engine and only a new `load` can: a source restarted from byte 0 (a transcode respawn), a playlist still frozen after the stall ladder's last reload rung (#65), an in-engine reopen transport whose budget is spent (#199). Production is halted before it fires.
 
-Answering it: negotiate a fresh URL and `load` again, or, where the URL is fixed (an IPTV channel), load the same one again. Guard the answer with one retune in flight, a minimum spacing and a bounded count per session, then surface the exhausted case the way a terminal `.error` would be surfaced, because a ladder that ends on a silent `return` leaves the same dead channel behind a counter.
+Answering it: negotiate a fresh URL and `load` again, or, where the URL is fixed (an IPTV channel), load the same one again. Guard the answer with one retune in flight, a minimum spacing and a bounded retry policy renewed by verified playback progress, then surface the exhausted case the way a terminal `.error` would be surfaced, because a ladder that ends on a silent `return` leaves the same dead channel behind a counter.
+
+### Live: exhausted verified replay
+
+`liveSourceReplayExhausted` is a per-session subject for native HLS recovery that
+cannot reach new media after verifying previously admitted packets. The engine
+parks production while preserving cached DVR media. The host should report source
+unavailability instead of automatically calling `load` or switching decoders:
+either would discard the packet history that prevented repeated pictures. An
+explicit user retry starts a new session. This event is separate from
+`liveSourceReset`, which requests fresh negotiation for ordinary source loss or a
+changed track layout. Reconnects that admit new media renew the engine's existing
+progress-based reopen budget; no application-specific retry policy lives here.
 
 ### Live: a resume that had to move
 
@@ -702,6 +716,7 @@ suppressing `AVPlayerItemLegibleOutput` to keep the measurement running.
 | `nativeLiveDVRMandatoryBytes` | The finite pinned playback payload that may exceed that allowance. Excludes init and subtitle data, muxer staging, AVPlayer's buffers, filesystem overhead and recordings. |
 | `setSoftwareLiveDVRLimits(_:availableCapacityBytes:)`, `softwareLiveDVRBytes` | The same lease for the software live spool, which needs `LoadOptions.softwareDVRRetention`. Expiry withdraws seekable history and prunes at the next append, so it is not an immediate physical reclaim while no packets arrive. A feeder whose cursor was evicted re-anchors through its normal seek before pumping again; a newer seek, pause, stop or source change wins over that recovery. `softwareLiveDVRBytes` is the retained packet payload. |
 | `liveSourceReset` | The retune contract above. |
+| `liveSourceReplayExhausted` | Verified replay could not reach new media within bounded source recovery. Cached DVR stays readable; automatic full load must not bypass its packet history. |
 | Timestamp resets | On the native loopback path `currentTime`, the seekable range, item placement and seek targets keep the session's initial timeline shift when the origin resets its timestamps, so the display time stays continuous. `clock.sourceTime` stays the presented frame's source PTS for cue matching, so the two intentionally differ after a reset. |
 | `liveResumeClamped`, `LiveResumeClamp` | A resume that found the playhead outside the window and moved it; see above. |
 | `liveScrubThumbnail(atSessionSeconds:maxWidth:)` | Still on the live session axis, decoded from what the session already holds. A native session reads its DVR segment cache; a software session reads its DVR packet ring (#544), so a tuner channel the box decodes in software has a scrub preview too. |

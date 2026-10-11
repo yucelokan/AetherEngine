@@ -560,7 +560,12 @@ each participating track (video alone for a video-only source). If that scan
 is interrupted, forwarding its old prefix would play known media again;
 selectively dropping it could also strand the divergent video inside a GOP or
 separate audio from its video. Instead the producer releases the candidate
-packets and exits as `sourceReplay`, which invokes the existing
+packets and exits as `sourceReplay`. A supported source then reopens inside the
+same session and retained cache. Its fresh producer receives a copy of the bounded
+accepted-packet history and source frontiers; only this cache-continuation path
+can recognize a short startup overlap. A seek, channel change or independent load
+starts without that history. The old source socket is retired before the new one
+opens. Changed codec/stream time bases or exhausted reopen budgets invoke the
 [`liveSourceReset` retune contract](api.md#live-the-retune-request).
 The host owns fresh negotiation and its bounded recovery policy. No unknown
 packet is silently classified as an exact duplicate. Bridged audio and separate
@@ -569,3 +574,10 @@ side-audio sources remain excluded.
 The cutter watchdog distinguishes an intentional overlap scan from a stuck cut
 while continuing to detect source starvation. No host API or resource policy is
 added; the guard and its packet history belong to the producer thread.
+
+Verified replay recovery retains the exact admitted-packet history together with
+the native DVR cache. If its bounded attempts cannot find new media,
+`liveSourceReplayExhausted` identifies that terminal condition separately from
+ordinary source loss: an automatic full load would discard the evidence and allow
+the old broadcast to repeat. New media renews the existing progress-based budget.
+Application retry/backoff and error presentation remain host-owned.

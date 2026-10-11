@@ -456,6 +456,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
     private var replayReadyIndex = 0
     private var replayPendingBytes = 0
     private var replayDeferredError: Error?
+    private var damagedPacketLogCounts: [String: Int] = [:]
     private static let maximumReplayPendingBytes = 96 * 1_024 * 1_024
     private static let maximumReplayPendingPackets = 10_000
 
@@ -2863,6 +2864,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     replayReady.removeAll(keepingCapacity: true)
                     replayReadyIndex = 0
                 }
+                logDamagedLivePacket(ready.packet, origin: ready.origin, action: "forwarded")
                 tapForRecording(ready.packet)
                 recordPlayedMedia(ready.packet, origin: ready.origin)
                 return (ready.packet, ready.origin, ready.sample)
@@ -2906,6 +2908,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         category: .session)
                 }
                 if liveReplayGuard.isDroppingReplay || decision.event != nil {
+                    if replayPending.isEmpty { noCutWatchdog?.setReplayChecking(true, at: Date()) }
+                    logDamagedLivePacket(read.packet, origin: read.origin, action: "held")
                     noCutWatchdog?.noteReplayPacketRead(at: Date())
                     replayPending.append(ReplayBufferedPacket(packet: read.packet, origin: read.origin,
                                                                sample: sample, isDuplicate: decision.drop))
@@ -2936,8 +2940,12 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
             if !replayPending.isEmpty {
                 noCutWatchdog?.noteReplayPacketRead(at: Date())
-                // Keep subtitle/caption/metadata packets in source order while the video/audio
-                // decision is pending. Their content is never discarded without an exact match.
+                if damagedLivePacketStream(read.packet, origin: read.origin) != nil {
+                    liveReplayGuard.noteDamagedPacket()
+                }
+                logDamagedLivePacket(read.packet, origin: read.origin, action: "held")
+                // Keep unclassified packets in source order until the paired decision;
+                // only packets explicitly marked corrupt can be discarded without a signature.
                 replayPending.append(ReplayBufferedPacket(packet: read.packet, origin: read.origin,
                                                            sample: sample, isDuplicate: false))
                 replayPendingBytes += max(0, Int(read.packet.pointee.size))
@@ -2948,15 +2956,41 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 continue
             }
             // The recording sees the same unique source packets as playback.
+            logDamagedLivePacket(read.packet, origin: read.origin, action: "forwarded")
             tapForRecording(read.packet)
             recordPlayedMedia(read.packet, origin: read.origin)
             return (read.packet, read.origin, sample)
         }
     }
 
+    private func damagedLivePacketStream(_ packet: UnsafePointer<AVPacket>, origin: PacketOrigin) -> String? {
+        guard isLive, (packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0 else { return nil }
+        if origin == .main, packet.pointee.stream_index == videoStreamIndex { return "video" }
+        if packet.pointee.stream_index == audioConfig?.sourceStreamIndex,
+           (origin == .side) == (sideAudioDemuxer != nil) { return "audio" }
+        return nil
+    }
+
+    private func logDamagedLivePacket(_ packet: UnsafePointer<AVPacket>, origin: PacketOrigin, action: String) {
+        guard let stream = damagedLivePacketStream(packet, origin: origin) else { return }
+        let key = stream + action
+        damagedPacketLogCounts[key, default: 0] += 1
+        let count = damagedPacketLogCounts[key]!
+        guard count <= 3 || count.isMultiple(of: 64) else { return }
+        let dts = packet.pointee.dts == Int64.min ? "missing" : String(packet.pointee.dts)
+        let pts = packet.pointee.pts == Int64.min ? "missing" : String(packet.pointee.pts)
+        let keyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
+        EngineLog.emit("[HLSSegmentProducer] live damaged packet: stream=\(stream) action=\(action) "
+            + "count=\(count) dts=\(dts) pts=\(pts) keyframe=\(keyframe)", category: .session)
+    }
+
     private func commitReplayCandidate() {
         for entry in replayPending {
-            if entry.isDuplicate {
+            // Corrupt untimed PES packets cannot provide a signature. Once both tracks
+            // establish the overlap, do not leak those damaged bytes into the new timeline.
+            let damaged = damagedLivePacketStream(entry.packet, origin: entry.origin) != nil
+            if entry.isDuplicate || (damaged && entry.sample == nil) {
+                if damaged { logDamagedLivePacket(entry.packet, origin: entry.origin, action: "discarded") }
                 var packet: UnsafeMutablePointer<AVPacket>? = entry.packet
                 trackedPacketFree(&packet)
             } else {

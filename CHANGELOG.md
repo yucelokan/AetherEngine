@@ -10,7 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- Foreground demux reads no longer depend on implicit utility-priority AVIO callbacks.
+  Owned reader/prewarm sessions use serial user-initiated delegate queues, and finite
+  requests return their origin slot at network completion. Cancellation and completion
+  share an idempotent lease; origin caps, FIFO admission and retry policy are unchanged.
 
 ## [7.34.1] - 2026-10-11
 

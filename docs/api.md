@@ -89,8 +89,10 @@ An interrupted exact replay first tries the bounded in-engine source reopen when
 there is a URL or fresh-reader factory. It retains the same cache, player item and
 bounded exact-packet history, so media already in the DVR window is not appended
 again even when the viewer is behind live. The failed connection is retired before
-opening the replacement. A changed codec/stream time base, missing reopen transport
-or exhausted recovery budget requests host negotiation through this subject.
+opening the replacement. A changed track layout or ordinary source loss that
+exhausts in-engine recovery requests host negotiation through this subject.
+Verified replay that cannot reach new media uses `liveSourceReplayExhausted`
+below, so an automatic full load cannot bypass the retained evidence.
 A complete overlap continues in place; an ambiguous clock reset retains ordinary
 discontinuity handling. Fresh-source recovery ends an active recording with
 `sourceReset` rather than silently splicing a new source into the old file.

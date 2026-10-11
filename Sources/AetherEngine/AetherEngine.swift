@@ -1487,7 +1487,10 @@ public final class AetherEngine: ObservableObject {
     public func retryLiveSourceRecovery() -> Bool {
         guard isLive, nativeVideoSession?.retryLiveSourceRecovery() == true else { return false }
         liveOutageSourceGivenUp = false
-        handleLiveOutageWindowExhausted()
+        // A timeshifted viewer can still be consuming cached runway. Restart the outage
+        // watcher only if that item actually ended, never replace it merely because the
+        // source connection is being renewed behind it.
+        if nativeHost?.didReachEnd == true { handleLiveOutageWindowExhausted() }
         return true
     }
 

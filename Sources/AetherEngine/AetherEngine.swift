@@ -1476,9 +1476,20 @@ public final class AetherEngine: ObservableObject {
 
     /// Bounded recovery could not find new media after a verified replay. Cached DVR media
     /// remains readable, but automatic `load` would discard its history and permit the same
-    /// broadcast to play again. The host should surface source unavailability; this is not
-    /// a codec failure. An explicit user retry starts a new session. Subscribe per session.
+    /// broadcast to play again. The host can retry with `retryLiveSourceRecovery()` after
+    /// its own backoff; this is not a codec failure. Subscribe per session.
     public let liveSourceReplayExhausted = PassthroughSubject<Void, Never>()
+
+    /// Resume a parked live source without replacing the consumer item, DVR cache or replay
+    /// evidence. Returns true when the retained session accepted the retry or has a retry in flight;
+    /// false when this route cannot continue it. Calls coalesce; the host owns retry timing.
+    @discardableResult
+    public func retryLiveSourceRecovery() -> Bool {
+        guard isLive, nativeVideoSession?.retryLiveSourceRecovery() == true else { return false }
+        liveOutageSourceGivenUp = false
+        handleLiveOutageWindowExhausted()
+        return true
+    }
 
     /// AE#444 follow-up (Sodalite#104): fires when a resume found the playhead outside the DVR window
     /// and moved it forward.

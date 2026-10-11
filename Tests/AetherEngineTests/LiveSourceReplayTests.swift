@@ -44,6 +44,7 @@ struct LiveSourceReplayTests {
     /// compressed frames and source timestamps. Changing an AUD leaves the picture intact.
     private func fixture(data: Data = TinyTransportStreamFixture.data,
                          divergenceFrame: Int = 5,
+                         divergenceFrames: Int = 1,
                          headFrames: Int = 8,
                          replayStartFrame: Int = 0) throws -> (head: Data, tail: Data,
                                                               replay: Data, diverged: Data) {
@@ -60,8 +61,10 @@ struct LiveSourceReplayTests {
         let replayStart = replayStartFrame == 0 ? 0 : offsets[replayStartFrame] / 188 * 188
         let replay = Data(head[replayStart...])
         var diverged = replay
-        let changedAUD = try #require(offsets.dropFirst(divergenceFrame).first) + 5 - replayStart
-        diverged[changedAUD] = 0xD0
+        for offset in offsets.dropFirst(divergenceFrame).prefix(divergenceFrames) {
+            let changedAUD = offset + 5 - replayStart
+            if changedAUD < diverged.count { diverged[changedAUD] = 0xD0 }
+        }
         return (head, Data(data[seam...]), replay, diverged)
     }
 
@@ -143,11 +146,13 @@ struct LiveSourceReplayTests {
         try await run(clip.head + clip.head + clip.tail, expected: "eof", expectedRebases: 0)
     }
 
-    @Test("a long exact prefix followed by a different packet requests a fresh source")
+    @Test("a damaged packet inside verified overlap does not replay or restart the source")
     func divergentOverlapDoesNotReplayItsPrefix() async throws {
         let clip = try fixture()
-        try await run(clip.head + clip.diverged + clip.tail,
-                      expected: "sourceReplay", expectedRebases: 0)
+        let result = try await run(clip.head + clip.diverged + clip.tail,
+                                   expected: "eof", expectedRebases: 0)
+        let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
+        #expect(result.packetsWrittenCount == control.packetsWrittenCount)
     }
 
     @Test("a source ending inside a long exact overlap never publishes that overlap")
@@ -174,7 +179,7 @@ struct LiveSourceReplayTests {
 
     @Test("a short ambiguous match preserves a genuine source clock reset")
     func ambiguousOverlapKeepsNewMedia() async throws {
-        let clip = try fixture(divergenceFrame: 1)
+        let clip = try fixture(divergenceFrame: 1, divergenceFrames: 7)
         try await run(clip.head + clip.diverged + clip.tail, expected: "eof", expectedRebases: 1)
     }
 
@@ -190,11 +195,13 @@ struct LiveSourceReplayTests {
     func pairedDivergentOverlap() async throws {
         let clip = try fixture(data: Self.audioVideoFixture(), divergenceFrame: 9,
                                headFrames: 12, replayStartFrame: 2)
-        try await run(clip.head + clip.diverged + clip.tail,
-                      expected: "sourceReplay", expectedRebases: 0)
+        let result = try await run(clip.head + clip.diverged + clip.tail,
+                                   expected: "eof", expectedRebases: 0)
+        let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
+        #expect(result.packetsWrittenCount == control.packetsWrittenCount)
     }
 
-    @Test("an AAC packet differing after a paired replay prefix requests fresh negotiation")
+    @Test("a changed AAC packet inside paired overlap continues without replay")
     func pairedAudioDivergence() async throws {
         let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
         var replay = clip.replay
@@ -207,7 +214,9 @@ struct LiveSourceReplayTests {
         }
         let offset = try #require(offsets.dropFirst(150).first)
         replay[offset + 2] ^= 0x02 // ADTS private bit: different bytes, same AAC configuration.
-        try await run(clip.head + replay + clip.tail, expected: "sourceReplay", expectedRebases: 0)
+        let result = try await run(clip.head + replay + clip.tail, expected: "eof", expectedRebases: 0)
+        let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
+        #expect(result.packetsWrittenCount == control.packetsWrittenCount)
     }
 
     @Test("paired replay interrupted by EOF or read failure never re-enters either timeline")

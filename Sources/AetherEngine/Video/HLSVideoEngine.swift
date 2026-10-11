@@ -2654,6 +2654,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         retentionClaim = nil
         let p = producer
         producer = nil
+        liveRecoveryProducer = nil
         let s = server
         server = nil
         let c = cache
@@ -3006,6 +3007,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// After `maxBarrenReopenCycles` consecutive cycles producing no new segment, stop reviving.
     var barrenReopenCycles = 0
     var liveRecoveryHasVerifiedReplay = false
+    var liveSourceRequiresNegotiation = false
+    var liveRecoveryProducer: HLSSegmentProducer?
     var lastReopenSegmentCount = -1
     static let maxBarrenReopenCycles = 3
     /// Live muxerFailed in-place rebuilds, bounded by progress like the reopen cycles above: new segments

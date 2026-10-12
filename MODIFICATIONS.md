@@ -17,6 +17,22 @@ This record identifies the modification dates and source files. These are genera
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
 
+## Native video presentation recovery
+
+Date: 2026-10-12. Native playback now distinguishes an advancing item/audio clock
+from a previously visible inline layer that remains unready. Bounded same-position
+consumer repair preserves the source and live DVR; PiP, external playback, seeks,
+pauses, detached/hidden surfaces and starvation are excluded. Optional decoded
+output diagnostics detach before PiP and reattach only after inline readiness.
+Readiness/eligibility and repair outcomes are logged without source identifiers.
+
+Changes are generic engine code in `AetherEngine+Loading.swift`, `AetherEngine.swift`,
+`Native/NativeAVPlayerHost.swift` and `Diagnostics/VideoFrameProgress.swift`, offered
+in PR #747. Long-GOP H.264 High / 25 fps / AAC-LC regressions compare all decoded
+pictures after a damaged replay through both software admission and native remux.
+The reported PiP black-screen onset itself is not conclusively established by the
+older logs; the diagnostic transition and missing recovery path are addressed.
+
 ## Upstream 7.35.1 integration and contribution coverage
 
 Date: 2026-10-12. The published release is the integration base; unreleased

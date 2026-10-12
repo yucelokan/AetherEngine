@@ -62,6 +62,7 @@ struct LivePacketReplayGuard {
 
     private struct Overlap {
         let videoFrontier: Int64
+        let admittedVideoFrontier: Int64
         let audioFrontier: Int64
         let requiresAudioMatch: Bool
         var videoFinished = false
@@ -77,12 +78,15 @@ struct LivePacketReplayGuard {
         var firstUnmatchedVideoSeconds: Double?
         var firstUnmatchedAudioSeconds: Double?
         var containsUnmatchedPackets = false
+        var pendingVideoSignatures: Set<Signature> = []
     }
 
     private struct DamagedBoundary {
         let sourceSeconds: Double
         let dts: Int64
+        let maximumSeconds: Double
         var packets = 1
+        var intactVideo: [Signature] = []
     }
 
     private static let historySeconds = 45.0
@@ -98,6 +102,7 @@ struct LivePacketReplayGuard {
     private var signatureCounts: [Signature: Int] = [:]
     private var overlap: Overlap?
     private var damagedBoundary: DamagedBoundary?
+    private var videoCadence = VideoPacketProgress()
     private var isSourceContinuation = false
     private var replayTailVideoFrontier: Int64?
     private var replayTailAudioFrontier: Int64?
@@ -149,6 +154,7 @@ struct LivePacketReplayGuard {
         signatureCounts.removeAll(keepingCapacity: true)
         overlap = nil
         damagedBoundary = nil
+        videoCadence = VideoPacketProgress()
         isSourceContinuation = false
         replayTailVideoFrontier = nil
         replayTailAudioFrontier = nil
@@ -159,6 +165,7 @@ struct LivePacketReplayGuard {
 
     mutating func record(_ signature: Signature, sourceSeconds: Double) {
         guard sourceSeconds.isFinite else { return }
+        if signature.stream == .video { _ = videoCadence.observe(sourceSeconds) }
         entries.append(Entry(signature: signature, sourceSeconds: sourceSeconds))
         signatureCounts[signature, default: 0] += 1
         // Freeze time pruning during a confirmed overlap: the fresh audio/video stream may cross
@@ -211,10 +218,13 @@ struct LivePacketReplayGuard {
                 if var boundary = damagedBoundary {
                     let holdVideo = signature.stream == .video && (isCorrupt || signature.dts >= boundary.dts)
                     if holdVideo { boundary.packets += 1 }
+                    if holdVideo && !isCorrupt { boundary.intactVideo.append(signature) }
                     // Demux interleaving may release an earlier intact picture AFTER the
                     // damaged one. Admit that picture/audio now; only hold the video boundary.
-                    if (signature.stream == .video && !isCorrupt && signature.dts > boundary.dts)
-                        || (signature.stream == .video && sourceSeconds - boundary.sourceSeconds > Self.maximumUnmatchedSeconds)
+                    // A clean outgoing straggler is not proof of fresh source progression.
+                    // Cover two frame intervals on sparse video without an unbounded scan.
+                    if (signature.stream == .video
+                        && sourceSeconds - boundary.sourceSeconds > boundary.maximumSeconds + timeBaseSeconds)
                         || boundary.packets >= Self.maximumUnmatchedPackets {
                         damagedBoundary = nil
                         return Decision(drop: false, event: .damagedBoundaryForwarded)
@@ -226,17 +236,24 @@ struct LivePacketReplayGuard {
                     // The old connection's last partial PES can precede timestamp rollback.
                     // Do not publish it or record it as the frontier before the next picture
                     // can establish replay and supply the intact frame at the same timestamp.
-                    damagedBoundary = DamagedBoundary(sourceSeconds: sourceSeconds, dts: signature.dts)
+                    damagedBoundary = DamagedBoundary(sourceSeconds: sourceSeconds, dts: signature.dts,
+                        maximumSeconds: Swift.max(Self.maximumUnmatchedSeconds, 2 * (videoCadence.cadence ?? 0)))
                     return Decision(drop: false, event: .damagedBoundaryHeld, holdDamagedBoundary: true)
                 }
                 return Decision(drop: false, event: nil)
             }
+            let pendingVideo = damagedBoundary?.intactVideo ?? []
             let hadDamagedBoundary = damagedBoundary != nil
             damagedBoundary = nil
             let requiresAudioMatch = hasAudio || audioFrontier != Int64.min
-            overlap = Overlap(videoFrontier: videoFrontier, audioFrontier: audioFrontier,
+            // Held intact outgoing pictures define the same-source horizon, but are
+            // provisional identity only: record them as admitted history at commit.
+            let retainedVideoFrontier = Swift.max(videoFrontier, pendingVideo.map(\.dts).max() ?? videoFrontier)
+            overlap = Overlap(videoFrontier: retainedVideoFrontier,
+                              admittedVideoFrontier: videoFrontier, audioFrontier: audioFrontier,
                               requiresAudioMatch: requiresAudioMatch,
-                              videoFinished: false, audioFinished: !requiresAudioMatch)
+                              videoFinished: false, audioFinished: !requiresAudioMatch,
+                              pendingVideoSignatures: Set(pendingVideo))
             overlap?.containsUnmatchedPackets = hadDamagedBoundary
             if signatureCounts[signature] != nil {
                 return dropMatched(signature, sourceSeconds: sourceSeconds, event: .began)
@@ -253,8 +270,16 @@ struct LivePacketReplayGuard {
             return Decision(drop: false, event: .mismatch(
                 videoPackets: current.videoPackets, audioPackets: current.audioPackets))
         }
+        if signature.stream == .video, signature.dts > current.admittedVideoFrontier,
+           signature.dts <= current.videoFrontier, !current.pendingVideoSignatures.contains(signature) {
+            // The intact replacement for the damaged picture was never admitted.
+            // Retain it while verifying through the later queued outgoing pictures.
+            current.videoFinished = false
+            overlap = current
+            return Decision(drop: false, event: nil)
+        }
         if frontier != Int64.min, signature.dts <= frontier {
-            guard signatureCounts[signature] != nil else {
+            guard signatureCounts[signature] != nil || current.pendingVideoSignatures.contains(signature) else {
                 let lastMatch = signature.stream == .video ? current.lastVideoSeconds : current.lastAudioSeconds
                 let unmatched = signature.stream == .video ? current.unmatchedVideo : current.unmatchedAudio
                 // A damaged first PES can precede this track's first exact match. Its own

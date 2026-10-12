@@ -52,6 +52,11 @@ struct VideoPacketProgress {
     private var last: Double?
     private var intervals: [Double] = []
 
+    var cadence: Double? {
+        let ordered = intervals.sorted()
+        return ordered.isEmpty ? nil : ordered[ordered.count / 2]
+    }
+
     mutating func observe(_ seconds: Double) -> Gap? {
         guard seconds.isFinite else { return nil }
         defer { last = seconds }
@@ -61,8 +66,7 @@ struct VideoPacketProgress {
             if delta < 0 { intervals.removeAll(keepingCapacity: true) }
             return nil
         }
-        let ordered = intervals.sorted()
-        let cadence = ordered.isEmpty ? nil : ordered[ordered.count / 2]
+        let cadence = self.cadence
         if intervals.count >= 4, let cadence, delta > Swift.max(0.25, 5 * cadence) {
             return Gap(previous: previous, seconds: delta, cadence: cadence)
         }

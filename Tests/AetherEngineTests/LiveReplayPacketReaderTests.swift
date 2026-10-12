@@ -90,8 +90,10 @@ struct LiveReplayPacketReaderTests {
             + [Sample(stream: 0, time: 40, byte: 9, corrupt: true)]
             + packets(41..<50)
         let output = try read(input, reader: reader())
-        #expect(output.map(\.time) == input.map(\.time))
-        #expect(output.map(\.byte) == input.map(\.byte))
+        for stream: Int32 in [0, 1] {
+            #expect(output.filter { $0.stream == stream }.map(\.time) == input.filter { $0.stream == stream }.map(\.time))
+            #expect(output.filter { $0.stream == stream }.map(\.byte) == input.filter { $0.stream == stream }.map(\.byte))
+        }
     }
 
     @Test("an outgoing good picture arriving after audio rollback is kept once in decode order")
@@ -103,6 +105,17 @@ struct LiveReplayPacketReaderTests {
         let output = try read(input, reader: reader())
         #expect(output.filter { $0.stream == 0 }.map(\.time) == Array(0..<50).map(Int64.init))
         #expect(output.allSatisfy { $0.byte == 1 })
+    }
+
+    @Test("an outgoing good picture before rollback cannot release a damaged video boundary")
+    func outgoingPictureBeforeRollback() throws {
+        let input = packets(0..<40)
+            + [Sample(stream: 0, time: 40, byte: 9, corrupt: true),
+               Sample(stream: 0, time: 41)]
+            + packets(0..<50)
+        let output = try read(input, reader: reader())
+        #expect(output.filter { $0.stream == 0 }.map(\.time) == Array(0..<50).map(Int64.init))
+        #expect(output.allSatisfy { $0.byte == 1 }, "a clean outgoing straggler must not release the damaged frontier before rollback")
     }
 
     @Test("an unverified damaged tail at EOF preserves the original media")

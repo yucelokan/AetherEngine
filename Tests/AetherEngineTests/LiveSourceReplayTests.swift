@@ -211,9 +211,9 @@ struct LiveSourceReplayTests {
         let retainedSegments = cache.count
         let second = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0,
                                    retainedCache: cache, predecessor: first)
-        let control = try await run(clip.tail, expected: "eof", expectedRebases: 0)
-        #expect(second.packetsWrittenCount == control.packetsWrittenCount,
-                "only new media, not the repeated cached prefix, reaches the second muxer")
+        let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
+        #expect(first.packetsWrittenCount + second.packetsWrittenCount == control.packetsWrittenCount,
+                "every picture is admitted once, including intact tail packets held before source loss")
         #expect(cache.count > retainedSegments)
         let beforeThird = cache.count
         let third = try await run(clip.head + clip.tail, expected: "sourceReplay", expectedRebases: 0,
@@ -314,6 +314,23 @@ struct LiveSourceReplayTests {
         }
         let result = try await run(clip.head + changed + clip.tail, expected: "eof", expectedRebases: 1)
         #expect(result.packetsWrittenCount == 26, "12 initial + 10 changed + 4 trailing pictures")
+    }
+
+    @Test("a clean outgoing PES before rollback cannot release the damaged video boundary")
+    func corruptOutgoingVideoBeforeCleanTail() async throws {
+        let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
+        var head = clip.head
+        let aud = Data([0, 0, 0, 1, 9, 0xF0])
+        let last = try #require(head.range(of: aud, options: .backwards))
+        let previous = try #require(head.range(of: aud, options: .backwards, in: 0..<last.lowerBound))
+        head[previous.lowerBound / 188 * 188 + 1] |= 0x80
+        let capture = EngineLogCapture()
+        defer { capture.end() }
+        let result = try await run(head + clip.replay + clip.tail, expected: "eof", expectedRebases: 0)
+        let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
+        #expect(result.packetsWrittenCount == control.packetsWrittenCount)
+        #expect(!capture.matching("live damaged packet: stream=video action=discarded").isEmpty)
+        #expect(capture.matching("live damaged packet: stream=video action=forwarded").isEmpty)
     }
 
     @Test("the damaged outgoing video boundary is withheld until its intact replay arrives")

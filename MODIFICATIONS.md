@@ -28,6 +28,12 @@ read failure forward the retained media without erasing admitted source history.
 Earlier intact video/audio remain available during the boundary check. Verified
 queues keep exact packets once and restore per-video decode order when the
 outgoing demuxer releases a late intact picture.
+Follow-up on the same date: a clean outgoing picture no longer releases the
+boundary by itself. Cadence-aware bounded lookahead covers sparse video, queued
+intact pictures supply provisional replay identity, and their missing predecessor
+is admitted from the intact returning copy. Recovery history still contains only
+committed packets. Both native encoded MPEG-TS and software packet regressions
+reproduce the clean-outgoing-picture-before-rollback order from device logs.
 
 An opt-in `LoadOptions.nativeVideoFrameDiagnostics` observes decoded SDR native
 output without suppressing the player renderer or retaining pixel buffers. Its

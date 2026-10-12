@@ -171,7 +171,11 @@ packet is discarded only with that evidence. Good pictures released late by the 
 parser do not complete a track before its replay is traversed. Verified pending video is
 ordered by decode timestamp, exact returning copies are removed, and the settling frontier
 covers every retained good packet. An ambiguous boundary, EOF or read failure preserves its
-packets and admitted history. Held-video packet count and source interval bound the lookahead;
+packets and admitted history. A clean outgoing picture cannot release the boundary on its own.
+The lookahead covers sparse-video cadence as well as the bounded source interval; the packet
+count remains capped. Held intact pictures define a provisional replay horizon, while the
+replacement for the damaged picture remains fresh media until admitted. Only committed
+packets enter retained source history. Held-video packet count and source interval bound the lookahead;
 transport and no-cut watchdog deadlines remain responsible for a source that stops delivering.
 
 Video diagnostics keep source packet cadence separate from native decoded-output progress.

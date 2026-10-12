@@ -18,6 +18,9 @@ the public-API contract.
 - **Video-progress diagnostics:** opt-in SDR native-loopback output sampling distinguishes
   decoded-frame gaps, observation delays and compressed-packet timestamp gaps. No automatic
   seek, source retry, decoder fallback or playback error is introduced.
+- **Outgoing PES interleaving:** keep a damaged video boundary quarantined across clean
+  outgoing pictures that precede timestamp rollback, with sparse-video cadence bounds.
+  Preserve its intact replacement and exact-once admission through interrupted recovery.
 
 - **Cached-segment slow-serve regression:** test byte preservation and absence of producer restarts under a deliberately delayed serve, rather than assuming a cache hit always finishes before a wall-clock notification threshold. Runtime behavior is unchanged.
 - **Variable live GOP durations:** when a finalized segment outgrows the sealed

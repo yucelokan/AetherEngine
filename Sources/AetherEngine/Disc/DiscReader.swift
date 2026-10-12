@@ -80,12 +80,18 @@ enum DiscReader {
         }
         let totalBytes = allExtents.reduce(Int64(0)) { $0 + max(0, $1.length) }
         EngineLog.emit("[disc] Blu-ray recognized: \(titles.count) title(s), selected \(selectedIndex) clips=\(selected.bdClipIDs ?? []) m2ts-extents=\(allExtents.count) bytes=\(totalBytes) clipSpans=\(clipTimeline.count) stnLanguages=\(selected.streamLanguages.count)", category: .demux)
+        let clipInfoDir = (try? udf.list(path: ["BDMV", "CLIPINF"])) ?? []
+        let seekTable = buildSeekTable(title: selected, resolved: assembled.resolved) { clip in
+            guard let entry = clipInfoDir.first(where: { $0.name.caseInsensitiveCompare("\(clip).clpi") == .orderedSame }),
+                  let extents = try? udf.extents(of: entry), !extents.isEmpty else { return nil }
+            return readAll(reader, extents)
+        }
         storeRecognition(cacheKey: cacheKey, selectTitleID: selectTitleID,
                          formatHint: "mpegts", titles: titles, selectedIndex: selectedIndex,
-                         extents: allExtents, clipTimeline: clipTimeline)
+                         extents: allExtents, clipTimeline: clipTimeline, seekTable: seekTable)
         return DiscInfo(reader: ConcatIOReader(base: reader, extents: allExtents),
                         formatHint: "mpegts", titles: titles, selectedTitleIndex: selectedIndex,
-                        clipTimeline: clipTimeline)
+                        clipTimeline: clipTimeline, seekTable: seekTable)
     }
 
     // MARK: - Bounds on what a disc image can make recognition do (audit NET-103)
@@ -103,7 +109,7 @@ enum DiscReader {
     /// A run of this many unreadable playlists means the source is gone (cancelled or closed reader).
     private static let maxConsecutiveShortReads = 16
     /// `readAll`'s ceiling.
-    private static let maxSmallFileBytes: Int64 = 8 * 1024 * 1024
+    static let maxSmallFileBytes: Int64 = 8 * 1024 * 1024
 
     /// Reads and parses the `.mpls` entries of a PLAYLIST directory under the bounds above. Stops at the
     /// first bound that trips and keeps what was parsed before it.
@@ -112,12 +118,23 @@ enum DiscReader {
         extents: (UDFEntry) -> [(offset: Int64, length: Int64)],
         read: ([(offset: Int64, length: Int64)]) -> [UInt8]
     ) -> [MPLSPlaylist] {
+        scanPlaylists(entries, name: \.name, extents: extents, read: { _, exts in read(exts) })
+    }
+
+    /// The same scan over any directory listing: a UDF directory, or the files of a disc folder
+    /// (`DiscDirectoryReader`), where each playlist is one whole file rather than a set of extents.
+    static func scanPlaylists<Entry>(
+        _ entries: [Entry],
+        name: (Entry) -> String,
+        extents: (Entry) -> [(offset: Int64, length: Int64)],
+        read: (Entry, [(offset: Int64, length: Int64)]) -> [UInt8]
+    ) -> [MPLSPlaylist] {
         var parsed: [MPLSPlaylist] = []
         var examined = 0
         var bytesRead: Int64 = 0
         var items = 0
         var shortReads = 0
-        for e in entries where e.name.hasSuffix(".mpls") {
+        for e in entries where name(e).hasSuffix(".mpls") {
             examined += 1
             guard examined <= maxPlaylistFiles else {
                 EngineLog.emit("[disc] PLAYLIST scan stopped at \(maxPlaylistFiles) .mpls entries", category: .demux)
@@ -132,7 +149,7 @@ enum DiscReader {
                 EngineLog.emit("[disc] PLAYLIST scan stopped after \(maxPlaylistBytes) bytes of playlists", category: .demux)
                 break
             }
-            let bytes = read(exts)
+            let bytes = read(e, exts)
             if Int64(bytes.count) < declared {
                 shortReads += 1
                 if shortReads >= maxConsecutiveShortReads {
@@ -156,21 +173,36 @@ enum DiscReader {
     /// Resolves a title's clips into the concatenated extent list plus one `ClipSpan` per resolved clip
     /// (byte start in the concat stream, and how far to pull its timestamps back so it continues
     /// contiguously from clip 0, AE#105). Each distinct clip is looked up once, a repeated clip reuses its
-    /// extents, and the title ends at the clip that would pass `maxTitleExtents`.
+    /// extents, and the title ends at the clip that would pass `maxTitleExtents`. `resolved` names each
+    /// clip that made it in, by play item index, parallel to `clipTimeline`.
     static func assembleBluRayTitle(
         clipIDs: [String], subtractTicks: [Int64], cumulativeBeforeTicks: [UInt64],
         extentsOfClip: (String) -> [(offset: Int64, length: Int64)]?
-    ) -> (extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan]) {
-        var allExtents: [(offset: Int64, length: Int64)] = []
+    ) -> (extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan],
+          resolved: [(item: Int, clip: String, byteStart: Int64)]) {
+        let assembled = assembleBluRayTitle(clipIDs: clipIDs, subtractTicks: subtractTicks,
+                                            cumulativeBeforeTicks: cumulativeBeforeTicks,
+                                            piecesOfClip: extentsOfClip, length: \.length)
+        return (assembled.pieces, assembled.clipTimeline, assembled.resolved)
+    }
+
+    /// The same assembly over any byte source of a clip: the extents of an image, or the one file a clip is
+    /// in a disc folder. `length` is a piece's byte count in the concatenated stream.
+    static func assembleBluRayTitle<Piece>(
+        clipIDs: [String], subtractTicks: [Int64], cumulativeBeforeTicks: [UInt64],
+        piecesOfClip: (String) -> [Piece]?, length: (Piece) -> Int64
+    ) -> (pieces: [Piece], clipTimeline: [ClipSpan], resolved: [(item: Int, clip: String, byteStart: Int64)]) {
+        var allExtents: [Piece] = []
         var clipTimeline: [ClipSpan] = []
-        var resolved: [String: [(offset: Int64, length: Int64)]?] = [:]
+        var resolvedClips: [(item: Int, clip: String, byteStart: Int64)] = []
+        var resolved: [String: [Piece]?] = [:]
         var byteStart: Int64 = 0
         for (k, clip) in clipIDs.enumerated() {
-            let lookup: [(offset: Int64, length: Int64)]?
+            let lookup: [Piece]?
             if let known = resolved[clip] {
                 lookup = known
             } else {
-                lookup = extentsOfClip(clip)
+                lookup = piecesOfClip(clip)
                 resolved[clip] = .some(lookup)
             }
             guard let exts = lookup else { continue }
@@ -180,14 +212,15 @@ enum DiscReader {
             }
             let predictedShift = k < subtractTicks.count ? Double(subtractTicks[k]) / discTickRate : 0
             let cumBeforeSec = k < cumulativeBeforeTicks.count ? Double(cumulativeBeforeTicks[k]) / discTickRate : 0
+            resolvedClips.append((k, clip, byteStart))
             clipTimeline.append(ClipSpan(concatByteStart: byteStart,
                                          cumulativeBeforeSec: cumBeforeSec,
                                          predictedShiftSec: predictedShift))
             EngineLog.emit("[disc] AE#105 clip[\(k)] id=\(clip) subTicks=\(k < subtractTicks.count ? subtractTicks[k] : 0) predictedSec=\(String(format: "%.3f", predictedShift)) cumBeforeSec=\(String(format: "%.3f", cumBeforeSec)) byteStart=\(byteStart)", category: .demux, level: .verbose)
             allExtents += exts
-            byteStart += exts.reduce(Int64(0)) { $0 + max(0, $1.length) }
+            byteStart += exts.reduce(Int64(0)) { $0 + max(0, length($1)) }
         }
-        return (allExtents, clipTimeline)
+        return (allExtents, clipTimeline, resolvedClips)
     }
 
     /// Memoize a successful recognition so a re-open of the same source (track switch on a remote ISO)
@@ -195,12 +228,13 @@ enum DiscReader {
     private static func storeRecognition(
         cacheKey: String?, selectTitleID: Int?,
         formatHint: String, titles: [DiscTitle], selectedIndex: Int,
-        extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = []
+        extents: [(offset: Int64, length: Int64)], clipTimeline: [ClipSpan] = [],
+        seekTable: DiscSeekTable? = nil
     ) {
         guard let cacheKey else { return }
         let recognition = DiscRecognition(formatHint: formatHint, titles: titles,
                                           selectedTitleIndex: selectedIndex, extents: extents,
-                                          clipTimeline: clipTimeline)
+                                          clipTimeline: clipTimeline, seekTable: seekTable)
         DiscRecognitionCache.store(key: cacheKey, selectTitleID: selectTitleID, recognition)
         // The probe opens with selectTitleID == nil (default title), but the rest of the engine
         // references that same title by its resolved id (== selectedIndex): reloads and the subtitle
@@ -237,11 +271,16 @@ enum DiscReader {
     /// Blu-ray ISO, else nil. `selectTitleID` chooses the title (default = main). DVD titles are the
     /// per-VTS VOB groups, filtered by the VMGI TT_SRPT title list (whole-VTS; per-cell splitting deferred).
     static func wrap(_ reader: IOReader, selectTitleID: Int? = nil, cacheKey: String? = nil) throws -> DiscInfo? {
+        // A disc folder is a set of files, not one byte range, so it is recognized before the cache,
+        // which rebuilds a reader from extents of a single image.
+        if let folder = reader as? DiscDirectoryReader {
+            return wrapBluRayFolder(folder, selectTitleID: selectTitleID)
+        }
         if let cacheKey, let cached = DiscRecognitionCache.lookup(key: cacheKey, selectTitleID: selectTitleID) {
             return DiscInfo(reader: ConcatIOReader(base: reader, extents: cached.extents),
                             formatHint: cached.formatHint, titles: cached.titles,
                             selectedTitleIndex: cached.selectedTitleIndex,
-                            clipTimeline: cached.clipTimeline)
+                            clipTimeline: cached.clipTimeline, seekTable: cached.seekTable)
         }
         guard looksLikeISO9660(reader) else { return try wrapBluRay(reader, selectTitleID: selectTitleID, cacheKey: cacheKey) }
         let iso: ISO9660Reader

@@ -1,9 +1,9 @@
 # Downstream engine changes
 
-Date: 2026-10-12. Current base: upstream 7.34.1,
-`cc070bf8d7bd7004547283cf1dc0c70ccd00d616`.
+Date: 2026-10-12. Current base: upstream 7.35.1,
+`60ac862285ec641d67a984964634b54b57151704`.
 
-The runtime is based on upstream 7.34.1 with the diagnostic, live replay and callback-priority corrections
+The runtime is based on upstream 7.35.1 with the diagnostic, live replay and callback-priority corrections
 described below. All ten earlier downstream contribution PRs (#708–#717) are
 merged upstream and included in that release. The fork also retains this
 modification record and the incorporated GPL text. The API and correction
@@ -16,6 +16,28 @@ Exception in [LICENSE](LICENSE). The incorporated GPL text is supplied in
 This record identifies the modification dates and source files. These are general engine
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
+
+## Upstream 7.35.1 integration and contribution coverage
+
+Date: 2026-10-12. The published release is the integration base; unreleased
+main-only changes are not imported. Includes the persistent HTTP/1.1 ingest,
+format-description scheduling, Blu-ray EP-map/folder seeking, and segment-muxer
+teardown corrections from 7.35.0 and 7.35.1. FFmpegBuild is now 3.7.1 under the
+upstream minor-version range; other dependency ranges and deployment floors remain.
+
+All runtime differences are offered in upstream PRs #745–#748. The outgoing
+video boundary, cadence-aware verification, software admission and opt-in video
+progress diagnostics belong to #747; probe-error cause retention, callback
+priority and playlist renewal remain independently buildable contributions.
+A source-tree audit combines the four PR diffs on the release and compares every
+runtime source blob, retaining both recovery and playlist-renewal callbacks at
+shared registration sites. The fork alone retains this record and GPL text.
+
+The output observer excludes the external-playback property on visionOS, where
+that AVPlayer API is unavailable. iOS/tvOS/visionOS compilation and reproducible
+packet/MPEG-TS regressions cover the final correction. The device logs from the
+previous integrated revision found three decoded-output gaps; no subsequent
+physical-device run of the final lookahead is claimed.
 
 ## Current fork difference: outgoing damaged video boundary and output diagnostics
 

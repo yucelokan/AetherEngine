@@ -489,6 +489,9 @@ public final class Demuxer: @unchecked Sendable {
     /// A clip's observed base is only trusted on a clean forward crossing (`idx == lastReadClipIdx + 1`),
     /// so a seek landing mid-clip cannot mis-anchor that clip's fold offset. AE#105.
     private var lastReadClipIdx: Int = -1
+    /// The selected Blu-ray title's EP-map seek table, when every clip has one: a seek then goes to the
+    /// keyframe's byte instead of searching by timestamp (`seekByDiscTableLocked`). Under `accessLock`.
+    private var discSeekTable: DiscSeekTable?
     /// Observed raw STC base (seconds) of clip 0's first read packet. The fold anchors every clip to this so
     /// the folded timeline stays in clip 0's raw domain (the producer gate then zero-bases it). NaN until the
     /// first packet is read. Guarded by `accessLock`. AE#105.
@@ -508,6 +511,7 @@ public final class Demuxer: @unchecked Sendable {
         discStreamLanguages = info.selectedTitle?.streamLanguages ?? [:]
         discSubpictureStreamIDs = info.selectedTitle?.dvdSubpictureStreamIDs
         clipTimeline = info.clipTimeline
+        discSeekTable = info.seekTable
         lastClipIndex = 0
         lastReadClipIdx = -1
         clipBase0Sec = .nan
@@ -1231,9 +1235,23 @@ public final class Demuxer: @unchecked Sendable {
 
     /// AVFormatContext.bit_rate in bps, or 0 if unknown. Used by
     /// HLSVideoEngine.masterBandwidth to populate HLS BANDWIDTH attributes.
+    ///
+    /// A disc title takes its rate from its own size over its playlist duration instead, whenever
+    /// libavformat produced one. libavformat divides the source size by the duration it read off the
+    /// timestamps, and that duration is as unreliable over a multi-clip title whose clips restart their
+    /// clock as it is for `duration` (AE#105): a 6537 s title whose two clips both start at 11.6 s probed
+    /// as 388 s, and its 54.6 GB declared 1.1 Gbit/s on average and 2.25 Gbit/s at peak, a variant no
+    /// AVPlayer ever chose (it waited with no item to play). A title libavformat gives no rate for keeps
+    /// the 0 and the caller's over-declared fallback.
     var bitRate: Int64 {
         guard let ctx = formatContext else { return 0 }
-        return ctx.pointee.bit_rate
+        let declared = ctx.pointee.bit_rate
+        guard declared > 0, let titleSeconds = selectedDiscTitleDurationSeconds, let pb = ctx.pointee.pb else {
+            return declared
+        }
+        let size = avio_size(pb)
+        guard size > 0 else { return declared }
+        return Int64((Double(size) * 8 / titleSeconds).rounded())
     }
 
     /// AVFormatContext.start_time in AV_TIME_BASE units. Non-zero on re-muxed
@@ -2169,6 +2187,7 @@ public final class Demuxer: @unchecked Sendable {
         // seekable by design, so live callers keep their own rules.
         guard isSourceSeekable else { return false }
         dropPeekedPacketsLocked()
+        if seekByDiscTableLocked(ctx, sourceSeconds: seconds) { return true }
         let ret = avformat_seek_file(ctx, -1, Int64.min, timestamp, Int64.max, 0)
         if ret < 0 {
             #if DEBUG
@@ -2351,6 +2370,11 @@ public final class Demuxer: @unchecked Sendable {
         // seek on a remote ISO sat wedged ~230 s and every later re-arm queued behind it.
         avioProvider?.beginReadDeadline(secondsFromNow: timeout)
         defer { avioProvider?.endReadDeadline() }
+        // The software path and the subtitle side reader reposition here, so a disc title seeks by its
+        // EP maps here too, whichever stream anchors the request.
+        if seekByDiscTableLocked(ctx, sourceSeconds: seconds) {
+            return !(avioProvider?.readDeadlineFired ?? false) && probeControl?.isStopped != true
+        }
         let ret = avformat_seek_file(ctx, anchor, Int64.min, timestamp, Int64.max, 0)
         avformat_flush(ctx)
         resetSubpictureAssembly()  // #651: libavformat just dropped the parsers this stands in for
@@ -2540,6 +2564,24 @@ public final class Demuxer: @unchecked Sendable {
         return Self.sourceStartOrigin(
             formatStartUs: ctx.pointee.start_time, videoStreamStart: videoStart,
             videoTimeBaseNum: tbNum, videoTimeBaseDen: tbDen)
+    }
+
+    /// Repositions a Blu-ray title to the keyframe at or before `seconds` (the folded source axis) by its
+    /// clips' EP maps, in one byte seek. A timestamp search over a title whose clips each run their own
+    /// clock from the same start cannot tell the clips apart: a 3000 s seek on a two-clip title whose
+    /// clips both start at 11.6 s landed in the second clip, four packets before its end. Returns false,
+    /// with nothing moved, when the title has no table; the caller searches by timestamp then. Caller
+    /// holds `accessLock`.
+    private func seekByDiscTableLocked(_ ctx: UnsafeMutablePointer<AVFormatContext>, sourceSeconds seconds: Double) -> Bool {
+        guard let table = discSeekTable,
+              let hit = table.keyframe(forSourceSeconds: seconds, base0Sec: clipBase0Sec),
+              avformat_seek_file(ctx, -1, hit.offset, hit.offset, hit.offset, AVSEEK_FLAG_BYTE) >= 0 else { return false }
+        EngineLog.emit("[Demuxer] EP map seek: source=\(String(format: "%.3f", seconds))s -> clip \(hit.clip) keyframe "
+                       + "\(String(format: "%.3f", hit.keyframeSec))s on its clock, byte \(hit.offset)", category: .demux)
+        avformat_flush(ctx)
+        resetSubpictureAssembly()  // #651
+        lastReadClipIdx = -1  // AE#105: a landing mid-clip is not a clean crossing
+        return true
     }
 
     /// One AVSEEK_FLAG_BYTE positioning seek + flush. Shared by the estimate probe loop.

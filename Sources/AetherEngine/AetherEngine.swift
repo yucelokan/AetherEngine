@@ -3907,7 +3907,8 @@ public final class AetherEngine: ObservableObject {
     ) async throws -> HLSVODIngestReroute {
         guard let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: playlistURL,
-            httpHeaders: options.httpHeaders
+            httpHeaders: options.httpHeaders,
+            persistentHTTP1: options.heldSourceConnection
         ) else { return .notTaken }
         try checkLoadCurrent(generation)
         EngineLog.emit(

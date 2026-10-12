@@ -80,6 +80,72 @@ the public-API contract.
   requests return their origin slot at network completion. Cancellation and completion
   share an idempotent lease; origin caps, FIFO admission and retry policy are unchanged.
 
+## [7.35.1] - 2026-10-12
+
+### Fixed
+
+- **A seek lands on a Blu-ray title whose clips run their clocks over the same range.** A seek over a
+  disc title was a timestamp binary search across the concatenated clips, and when the clips each start
+  their clock at the same value (two clips both from 11.6 s, or the 600 s origin many discs use) the
+  search cannot tell them apart. On *Kotonoha no Niwa* (two clips) the first seek ended the session with
+  `Demuxer: read failed`; on *Himalaya* and *The Road* (three clips) every seek stalled and the playhead
+  stood still. Recognition (of an image and of a `BDMV` folder) now also reads each clip's `BDMV/CLIPINF/*.clpi`, and a seek takes the
+  folded title time to its clip, the clip's `in_time` to the clip's own clock, and the EP map to the
+  keyframe's byte: one byte reposition. All three discs then landed every seek (1500, 3000 and 200 s)
+  and played on. A single-clip title seeks the same way, with fewer requests (125 instead of 173 for a
+  start and three seeks on a remote ISO). A title with any clip lacking a readable EP map seeks by
+  timestamp as before.
+
+- **A live session no longer crashes the app when its segment muxer is torn down.** The teardown flush
+  of the fMP4 segment muxer ran while packets were still queued in libavformat's interleaver. movenc
+  takes the first queued packet as the track's end, and when `check_pkt` had clamped the written samples
+  past it (a sample declaring a duration beyond its successor), `get_cluster_duration` hit
+  `av_assert0(next_dts >= 0)` and aborted the whole process on the `HLSSegmentProducer.pump` thread
+  (reported from an IPTV app, `Assertion next_dts >= 0 failed at libavformat/movenc.c:1247`). The
+  teardown now drains the interleaver first, as the segment cut already did, and FFmpegBuild 3.7.1
+  patches movenc to skip such a packet instead of aborting, which also covers a drain cut short by a
+  write error. `MovencFragmentEndTests` reproduces the abort in a child process; each half alone keeps
+  it from happening.
+
+## [7.35.0] - 2026-10-12
+
+### Added
+
+- **A Blu-ray ripped as a `BDMV` folder plays over HTTP.** A host hands the folder to `load(source: .custom(reader))`
+  as a `DiscDirectoryReader`, or as the ready-made `HTTPDiscDirectoryReader` with one URL per file, and
+  the engine recognizes it the way it recognizes a Blu-ray ISO: the same bounded playlist scan and title
+  selection, the selected title's clips concatenated in playlist order, and the same multi-clip timeline,
+  chapters and track languages. The origin serves plain files over `Range` and never remuxes the disc. An
+  optional `preferredPlaylist` names the main title, so only that playlist is read. A controlled probe
+  (`limits` or `cancellation`) does not recognize a folder yet.
+- **`heldSourceConnection` now covers the HEVC-in-MPEG-TS HLS VOD ingest: one persistent HTTP/1.1
+  connection, reused across segments.** Some origins refuse a segment over h2 and over freshly
+  opened connections, but serve consecutive requests on one keep-alive connection. With the option
+  set, the AE#268 ingest sends its playlist, key and segment requests over one HTTP/1.1 connection
+  per origin, one segment at a time, and the carriage probe downloads the first segment whole so
+  the producer does not fetch it twice. A new connection opens only when the origin closes one, the
+  origin changes, or a seek abandons a body mid-transfer; a reused connection the origin dropped
+  while idle is retried once on a fresh one. Every open and close is logged with its protocol and
+  request count. TLS validation, the redirect header policy and the body limits are unchanged, and
+  sources without the option keep their transport (#732).
+
+### Fixed
+
+- **A disc title whose clips restart their clock declares a bandwidth AVPlayer can choose.** libavformat
+  divides the source size by the duration it reads off the timestamps, which over such a title is as
+  wrong as the duration itself (AE#105). A 6537 s UHD title whose two clips both start at 11.6 s probed
+  as 388 s and declared `BANDWIDTH=2253434656`; AVPlayer never picked the variant and waited with no
+  item to play. Whenever libavformat produces a rate for a disc title, the rate is now the title's size
+  over its playlist duration (66.9 Mbit/s for that title, which then started playing). A title
+  libavformat gives no rate for, which is what a remote ISO opened by URL gets, keeps the over-declared
+  fallback as before.
+- **The first readyToPlay after launch no longer freezes the host's main thread for seconds.** Since the
+  26 SDKs `AVAsset.load` runs on the caller's actor, and the native host read every track's format
+  descriptions on the main actor. The first audio format description a process builds loads the audio
+  DSP stack through dyld, measured at 3.8 s on an Apple TV 4K, so the host UI stalled while the video
+  kept playing. Those reads now run off the main actor; the logged and published values are unchanged
+  (#735).
+
 ## [7.34.1] - 2026-10-11
 
 ### Changed

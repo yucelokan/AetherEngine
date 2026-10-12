@@ -798,6 +798,7 @@ public final class AetherEngine: ObservableObject {
     /// the keepalive policy + pause-safety read it.
     public var pictureInPictureActive = false {
         didSet {
+            nativeHost?.pictureInPictureActive = pictureInPictureActive
             // SW-PiP Phase C: flip the frame compositor with the PiP state so subtitles appear in the
             // window and never double-draw under the fullscreen host overlay.
             softwareHost?.updateSubtitleCompositor(cues: subtitleCues + secondarySubtitleCues, enabled: pictureInPictureActive, delaySeconds: softwareSubtitleDelaySeconds)
@@ -3147,7 +3148,8 @@ public final class AetherEngine: ObservableObject {
     ///   whose seekable end IS the playhead, so the distance-behind-live that policy reads is zero and it
     ///   would aim at the edge, discarding the rewind the viewer kept through the whole outage.
     func reloadStalledConsumerItem(position: Double, allowPausedConsumer: Bool = false,
-                                   liveRejoinOverride: Double? = nil, replacementURL: URL? = nil) {
+                                   liveRejoinOverride: Double? = nil, replacementURL: URL? = nil,
+                                   preserveLivePosition: Double? = nil) {
         guard let host = nativeHost, let player = currentAVPlayer,
               let url = replacementURL ?? (player.currentItem?.asset as? AVURLAsset)?.url else { return }
         // Item death parks tcs at .paused; only that trigger may bypass the user-pause guard.
@@ -3169,14 +3171,17 @@ public final class AetherEngine: ObservableObject {
             behindWhenLastAdvancing: liveBehindWhenLastAdvancing,
             residentRange: liveWindow?.seekableRange,
             targetDurationSeconds: liveTargetDurationSeconds)
-        let rejoinPosition = replacementURL == nil ? (policyRejoin ?? liveRejoinOverride) : liveRejoinOverride
+        let rejoinPosition = preserveLivePosition
+            ?? (replacementURL == nil ? (policyRejoin ?? liveRejoinOverride) : liveRejoinOverride)
         // AE#446 round 3: name which of the two decided, because they mean different things and the
         // difference is exactly what a reader of this line is trying to establish. The policy reads
         // how far behind live the item was; a window closed with ENDLIST is a finite asset whose
         // seekable end IS the playhead, so that distance reads zero there and printing it next to a
         // carried position says nothing true about a timeshifted viewer.
         let liveTarget: String = rejoinPosition.map { position in
-            let provenance = replacementURL != nil
+            let provenance = preserveLivePosition != nil
+                ? "(video presentation repair at the current playhead)"
+                : replacementURL != nil
                 ? "(preserving the current position across playlist renewal)"
                 : policyRejoin != nil
                 ? "(\(String(format: "%.1f", liveBehindWhenLastAdvancing))s behind live when the "
@@ -3218,6 +3223,10 @@ public final class AetherEngine: ObservableObject {
                     + "to be corrected off it",
                     category: .engine)
             } else {
+                if preserveLivePosition != nil {
+                    EngineLog.emit("[AetherEngine] video presentation repair deferred: current position is not resident; preserving playback", category: .engine)
+                    return
+                }
                 EngineLog.emit(
                     "[AetherEngine] #454 the place it held is not in a segment the producer still "
                     + "holds, so the fresh item joins as before and the stashed seek decides",

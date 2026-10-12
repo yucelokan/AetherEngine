@@ -2865,6 +2865,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     replayReadyIndex = 0
                 }
                 logDamagedLivePacket(ready.packet, origin: ready.origin, action: "forwarded")
+                logVideoPacketProgress(ready.sample)
                 tapForRecording(ready.packet)
                 recordPlayedMedia(ready.packet, origin: ready.origin)
                 return (ready.packet, ready.origin, ready.sample)
@@ -2893,11 +2894,13 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
             let sample = liveReplaySample(packet: read.packet, origin: read.origin)
             if let sample {
+                let wasCheckingReplay = liveReplayGuard.isDroppingReplay
                 let decision = liveReplayGuard.inspect(
                     sample.signature, sourceSeconds: sample.seconds,
                     timeBaseSeconds: sample.timeBaseSeconds,
                     videoFrontier: lastVideoSourceDts, audioFrontier: lastAudioSourceDts,
-                    hasAudio: audioConfig != nil)
+                    hasAudio: audioConfig != nil,
+                    isCorrupt: damagedLivePacketStream(read.packet, origin: read.origin) != nil)
                 if decision.drop, !liveReplayGuard.isDroppingReplay, decision.event == nil {
                     var duplicate: UnsafeMutablePointer<AVPacket>? = read.packet
                     trackedPacketFree(&duplicate)
@@ -2912,14 +2915,22 @@ final class HLSSegmentProducer: @unchecked Sendable {
                         + "after timestamp rollback; checking both tracks before output",
                         category: .session)
                 }
-                if liveReplayGuard.isDroppingReplay || decision.event != nil {
-                    if replayPending.isEmpty { noCutWatchdog?.setReplayChecking(true, at: Date()) }
+                if liveReplayGuard.isDroppingReplay || decision.holdDamagedBoundary || decision.event != nil {
+                    // A held outgoing boundary can precede a damaged first returning PES.
+                    // Arm at the replay transition even when pending is already nonempty.
+                    if !wasCheckingReplay, liveReplayGuard.isDroppingReplay {
+                        noCutWatchdog?.setReplayChecking(true, at: Date())
+                    }
                     logDamagedLivePacket(read.packet, origin: read.origin, action: "held")
                     noCutWatchdog?.noteReplayPacketRead(at: Date())
                     replayPending.append(ReplayBufferedPacket(packet: read.packet, origin: read.origin,
                                                                sample: sample, isDuplicate: decision.drop))
                     replayPendingBytes += max(0, Int(read.packet.pointee.size))
                     switch decision.event {
+                    case .some(.damagedBoundaryHeld):
+                        EngineLog.emit("[HLSSegmentProducer] live damaged boundary held: sourceSeconds=\(String(format: "%.3f", sample.seconds)); waiting for replay evidence before publishing video", category: .session)
+                    case .some(.damagedBoundaryForwarded):
+                        forwardUnverifiedDamagedBoundary()
                     case .some(.quarantined):
                         EngineLog.emit("[HLSSegmentProducer] live overlap quarantined a changed packet; checking the bounded interval before output", category: .session)
                     case .some(.finished(let videoPackets, let audioPackets, let videoSeconds)):
@@ -2943,7 +2954,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                     continue
                 }
             }
-            if !replayPending.isEmpty {
+            if !replayPending.isEmpty, !liveReplayGuard.isHoldingDamagedBoundary {
                 noCutWatchdog?.noteReplayPacketRead(at: Date())
                 if damagedLivePacketStream(read.packet, origin: read.origin) != nil {
                     liveReplayGuard.noteDamagedPacket()
@@ -2962,6 +2973,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
             // The recording sees the same unique source packets as playback.
             logDamagedLivePacket(read.packet, origin: read.origin, action: "forwarded")
+            logVideoPacketProgress(sample)
             tapForRecording(read.packet)
             recordPlayedMedia(read.packet, origin: read.origin)
             return (read.packet, read.origin, sample)
@@ -2989,6 +3001,14 @@ final class HLSSegmentProducer: @unchecked Sendable {
             + "count=\(count) dts=\(dts) pts=\(pts) keyframe=\(keyframe)", category: .session)
     }
 
+    private var admittedVideoProgress = VideoPacketProgress()
+
+    private func logVideoPacketProgress(_ sample: LiveReplaySample?) {
+        guard let sample, sample.signature.stream == .video,
+              let gap = admittedVideoProgress.observe(sample.seconds) else { return }
+        EngineLog.emit("[VideoPacketProgress] event=gap route=native previous=\(String(format: "%.3f", gap.previous)) dts=\(String(format: "%.3f", sample.seconds)) gap=\(String(format: "%.3f", gap.seconds)) cadence=\(String(format: "%.3f", gap.cadence))", category: .session)
+    }
+
     private func commitReplayCandidate() {
         for entry in replayPending {
             // Once both tracks prove the overlap, discard its damaged boundary packets too.
@@ -3002,6 +3022,16 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 replayReady.append(entry)
             }
         }
+        let order = LivePacketReplayGuard.verifiedPacketOrder(replayReady.map { $0.sample?.signature })
+        let kept = Set(order)
+        for index in replayReady.indices where !kept.contains(index) {
+            var duplicate: UnsafeMutablePointer<AVPacket>? = replayReady[index].packet
+            trackedPacketFree(&duplicate)
+        }
+        replayReady = order.map { replayReady[$0] }
+        for entry in replayReady {
+            if let signature = entry.sample?.signature { liveReplayGuard.retainForwardedReplayPacket(signature) }
+        }
         replayPending.removeAll(keepingCapacity: true)
         replayPendingBytes = 0
         noCutWatchdog?.setReplayChecking(false, at: Date())
@@ -3009,6 +3039,10 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     private func rollbackReplayCandidate(reason: String,
                                          divergentStream: LivePacketReplayGuard.Stream? = nil) throws {
+        if liveReplayGuard.isHoldingDamagedBoundary {
+            forwardUnverifiedDamagedBoundary()
+            return
+        }
         if let evidence = liveReplayGuard.confirmedPrefix {
             let code: String = switch reason {
             case let value where value.hasPrefix("track diverged"): "track_diverged"
@@ -3039,6 +3073,15 @@ final class HLSSegmentProducer: @unchecked Sendable {
             "[HLSSegmentProducer] live source overlap unconfirmed: \(reason); "
             + "forwarding all packets to normal discontinuity handling",
             category: .session)
+    }
+
+    private func forwardUnverifiedDamagedBoundary() {
+        replayReady.append(contentsOf: replayPending)
+        replayPending.removeAll(keepingCapacity: true)
+        replayPendingBytes = 0
+        liveReplayGuard.releaseDamagedBoundary()
+        noCutWatchdog?.setReplayChecking(false, at: Date())
+        EngineLog.emit("[HLSSegmentProducer] live damaged boundary unconfirmed: forwarding retained packets without resetting source history", category: .session)
     }
 
     private func freeReplayPackets() {

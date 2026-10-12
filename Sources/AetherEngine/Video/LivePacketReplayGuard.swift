@@ -42,6 +42,8 @@ struct LivePacketReplayGuard {
     enum Event: Equatable {
         case began
         case quarantined
+        case damagedBoundaryHeld
+        case damagedBoundaryForwarded
         case finished(videoPackets: Int, audioPackets: Int, videoSeconds: Double)
         case mismatch(videoPackets: Int, audioPackets: Int)
         case interrupted(videoPackets: Int, audioPackets: Int)
@@ -50,6 +52,7 @@ struct LivePacketReplayGuard {
     struct Decision {
         let drop: Bool
         let event: Event?
+        var holdDamagedBoundary = false
     }
 
     private struct Entry {
@@ -76,6 +79,12 @@ struct LivePacketReplayGuard {
         var containsUnmatchedPackets = false
     }
 
+    private struct DamagedBoundary {
+        let sourceSeconds: Double
+        let dts: Int64
+        var packets = 1
+    }
+
     private static let historySeconds = 45.0
     private static let maximumEntries = 10_000
     private static let backwardTriggerSeconds = HLSSegmentProducer.discontinuityBackwardThresholdSeconds
@@ -88,11 +97,13 @@ struct LivePacketReplayGuard {
     private var firstEntry = 0
     private var signatureCounts: [Signature: Int] = [:]
     private var overlap: Overlap?
+    private var damagedBoundary: DamagedBoundary?
     private var isSourceContinuation = false
     private var replayTailVideoFrontier: Int64?
     private var replayTailAudioFrontier: Int64?
 
     var isDroppingReplay: Bool { overlap != nil }
+    var isHoldingDamagedBoundary: Bool { damagedBoundary != nil }
     var historyEntryCount: Int { entries.count - firstEntry }
 
     /// Untimed corrupt packets provide no proof. A completed scan containing one must
@@ -125,6 +136,7 @@ struct LivePacketReplayGuard {
     func sourceContinuation() -> Self {
         var result = self
         result.overlap = nil
+        result.damagedBoundary = nil
         result.isSourceContinuation = true
         result.replayTailVideoFrontier = nil
         result.replayTailAudioFrontier = nil
@@ -136,10 +148,14 @@ struct LivePacketReplayGuard {
         firstEntry = 0
         signatureCounts.removeAll(keepingCapacity: true)
         overlap = nil
+        damagedBoundary = nil
         isSourceContinuation = false
         replayTailVideoFrontier = nil
         replayTailAudioFrontier = nil
     }
+
+    /// An unverified boundary has no authority to erase admitted source history.
+    mutating func releaseDamagedBoundary() { damagedBoundary = nil }
 
     mutating func record(_ signature: Signature, sourceSeconds: Double) {
         guard sourceSeconds.isFinite else { return }
@@ -167,7 +183,7 @@ struct LivePacketReplayGuard {
 
     mutating func inspect(_ signature: Signature, sourceSeconds: Double, timeBaseSeconds: Double,
                           videoFrontier: Int64, audioFrontier: Int64,
-                          hasAudio: Bool = false) -> Decision {
+                          hasAudio: Bool = false, isCorrupt: Bool = false) -> Decision {
         guard sourceSeconds.isFinite, timeBaseSeconds > 0, signature.dts != Int64.min else {
             return Decision(drop: false, event: nil)
         }
@@ -192,12 +208,36 @@ struct LivePacketReplayGuard {
                       $0.signature.stream == signature.stream && $0.signature.dts == signature.dts
                           && $0.signature.pts == signature.pts
                   }) else {
+                if var boundary = damagedBoundary {
+                    let holdVideo = signature.stream == .video && (isCorrupt || signature.dts >= boundary.dts)
+                    if holdVideo { boundary.packets += 1 }
+                    // Demux interleaving may release an earlier intact picture AFTER the
+                    // damaged one. Admit that picture/audio now; only hold the video boundary.
+                    if (signature.stream == .video && !isCorrupt && signature.dts > boundary.dts)
+                        || (signature.stream == .video && sourceSeconds - boundary.sourceSeconds > Self.maximumUnmatchedSeconds)
+                        || boundary.packets >= Self.maximumUnmatchedPackets {
+                        damagedBoundary = nil
+                        return Decision(drop: false, event: .damagedBoundaryForwarded)
+                    }
+                    damagedBoundary = boundary
+                    return Decision(drop: false, event: nil, holdDamagedBoundary: holdVideo)
+                } else if isCorrupt, signature.stream == .video,
+                          videoFrontier != Int64.min, historyEntryCount > 0 {
+                    // The old connection's last partial PES can precede timestamp rollback.
+                    // Do not publish it or record it as the frontier before the next picture
+                    // can establish replay and supply the intact frame at the same timestamp.
+                    damagedBoundary = DamagedBoundary(sourceSeconds: sourceSeconds, dts: signature.dts)
+                    return Decision(drop: false, event: .damagedBoundaryHeld, holdDamagedBoundary: true)
+                }
                 return Decision(drop: false, event: nil)
             }
+            let hadDamagedBoundary = damagedBoundary != nil
+            damagedBoundary = nil
             let requiresAudioMatch = hasAudio || audioFrontier != Int64.min
             overlap = Overlap(videoFrontier: videoFrontier, audioFrontier: audioFrontier,
                               requiresAudioMatch: requiresAudioMatch,
                               videoFinished: false, audioFinished: !requiresAudioMatch)
+            overlap?.containsUnmatchedPackets = hadDamagedBoundary
             if signatureCounts[signature] != nil {
                 return dropMatched(signature, sourceSeconds: sourceSeconds, event: .began)
             }
@@ -251,7 +291,9 @@ struct LivePacketReplayGuard {
             return dropMatched(signature, sourceSeconds: sourceSeconds, event: nil)
         }
 
-        if signature.stream == .video { current.videoFinished = true }
+        // The outgoing PES parser can release a later intact picture after audio has
+        // already rolled back. That straggler does not prove video traversed its replay.
+        if signature.stream == .video { current.videoFinished = current.videoPackets > 0 }
         else { current.audioFinished = true }
         if current.videoFinished && current.audioFinished {
             if current.containsUnmatchedPackets,
@@ -278,12 +320,14 @@ struct LivePacketReplayGuard {
                                       event: Event?) -> Decision {
         var current = overlap!
         if signature.stream == .video {
+            current.videoFinished = false
             current.unmatchedVideo = 0
             current.firstUnmatchedVideoSeconds = nil
             current.videoPackets += 1
             if current.firstVideoSeconds == nil { current.firstVideoSeconds = sourceSeconds }
             current.lastVideoSeconds = max(current.lastVideoSeconds ?? sourceSeconds, sourceSeconds)
         } else {
+            current.audioFinished = false
             current.unmatchedAudio = 0
             current.firstUnmatchedAudioSeconds = nil
             current.audioPackets += 1
@@ -292,5 +336,32 @@ struct LivePacketReplayGuard {
         }
         overlap = current
         return Decision(drop: true, event: event)
+    }
+
+    /// Good stragglers retained alongside the damaged boundary are already scheduled
+    /// once. Keep exact-match protection through THEIR frontier, not only the old one.
+    mutating func retainForwardedReplayPacket(_ signature: Signature) {
+        if signature.stream == .video, let tail = replayTailVideoFrontier {
+            replayTailVideoFrontier = Swift.max(tail, signature.dts)
+        } else if signature.stream == .audio, let tail = replayTailAudioFrontier {
+            replayTailAudioFrontier = Swift.max(tail, signature.dts)
+        }
+    }
+
+    /// Verified replay can interleave an outgoing good picture with its returning copy.
+    /// Preserve audio ordering, emit each exact packet once, and restore video decode order.
+    static func verifiedPacketOrder(_ signatures: [Signature?]) -> [Int] {
+        var seen: Set<Signature> = []
+        var indices = signatures.indices.filter { index in
+            guard let signature = signatures[index] else { return true }
+            return seen.insert(signature).inserted
+        }
+        let locations = indices.indices.filter { signatures[indices[$0]]?.stream == .video }
+        let sortedVideo = locations.map { indices[$0] }.sorted { a, b in
+            let left = signatures[a]!.dts, right = signatures[b]!.dts
+            return left == right ? a < b : left < right
+        }
+        for (location, index) in zip(locations, sortedVideo) { indices[location] = index }
+        return indices
     }
 }

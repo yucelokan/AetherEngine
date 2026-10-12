@@ -162,6 +162,24 @@ Routes the host did not ask for:
 
 Branch on this where host behaviour differs per pipeline: who draws subtitles (AVPlayer on the bypass, the host's renderer on loopback and software), and whether a composited PiP overlay is meaningful at all. Observing it also makes the mid-session reroute an event rather than a log line.
 
+## Live replay boundary and video diagnostics
+
+Live packet admission also protects the outgoing transport boundary. A timed, flagged video
+packet beyond admitted history is held while earlier intact pictures and audio continue.
+Exact replay on the participating tracks can supply the clean returning frame; the flagged
+packet is discarded only with that evidence. Good pictures released late by the outgoing
+parser do not complete a track before its replay is traversed. Verified pending video is
+ordered by decode timestamp, exact returning copies are removed, and the settling frontier
+covers every retained good packet. An ambiguous boundary, EOF or read failure preserves its
+packets and admitted history. Held-video packet count and source interval bound the lookahead;
+transport and no-cut watchdog deadlines remain responsible for a source that stops delivering.
+
+Video diagnostics keep source packet cadence separate from native decoded-output progress.
+The optional output observer belongs to one item/session, stops on teardown, excludes
+ineligible playback modes and discards its state through positioning or inactive rendering.
+It emits bounded progress summaries and gap episodes, without retaining pictures or making
+recovery decisions. Hosts control whether to enable it and where to send its measurements.
+
 ## Byte-reader callback scheduling
 
 The AVIO reader, held HTTP transport and prewarm fetcher use independent serial

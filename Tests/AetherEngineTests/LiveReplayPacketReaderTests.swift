@@ -73,6 +73,46 @@ struct LiveReplayPacketReaderTests {
         #expect(output.count == packets(0..<50).count)
     }
 
+    @Test("a truncated last video PES is replaced by its intact returning copy")
+    func damagedFrontierBeforeReplay() throws {
+        let input = packets(0..<40)
+            + [Sample(stream: 0, time: 40, byte: 9, corrupt: true)]
+            + packets(0..<50)
+        let output = try read(input, reader: reader())
+        #expect(output.map(\.time) == packets(0..<50).map(\.time))
+        #expect(output.map(\.stream) == packets(0..<50).map(\.stream))
+        #expect(output.allSatisfy { $0.byte == 1 }, "the damaged frontier must not poison the retained history")
+    }
+
+    @Test("a flagged video packet followed by fresh media is preserved without proof of replay")
+    func ambiguousDamageKeepsFreshMedia() throws {
+        let input = packets(0..<40)
+            + [Sample(stream: 0, time: 40, byte: 9, corrupt: true)]
+            + packets(41..<50)
+        let output = try read(input, reader: reader())
+        #expect(output.map(\.time) == input.map(\.time))
+        #expect(output.map(\.byte) == input.map(\.byte))
+    }
+
+    @Test("an outgoing good picture arriving after audio rollback is kept once in decode order")
+    func outgoingPictureDuringDamagedBoundary() throws {
+        let input = packets(0..<40)
+            + [Sample(stream: 0, time: 40, byte: 9, corrupt: true),
+               Sample(stream: 1, time: 0), Sample(stream: 0, time: 41)]
+            + packets(0..<50)
+        let output = try read(input, reader: reader())
+        #expect(output.filter { $0.stream == 0 }.map(\.time) == Array(0..<50).map(Int64.init))
+        #expect(output.allSatisfy { $0.byte == 1 })
+    }
+
+    @Test("an unverified damaged tail at EOF preserves the original media")
+    func damagedTailAtEOF() throws {
+        let input = packets(0..<40) + [Sample(stream: 0, time: 40, byte: 9, corrupt: true)]
+        let output = try read(input, reader: reader())
+        #expect(output.map(\.time) == input.map(\.time))
+        #expect(output.map(\.byte) == input.map(\.byte))
+    }
+
     @Test("interrupted verified replay is never admitted as new media")
     func interrupted() throws {
         #expect(throws: LiveReplayPacketReader.Failure.self) {

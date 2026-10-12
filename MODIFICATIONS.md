@@ -17,6 +17,37 @@ This record identifies the modification dates and source files. These are genera
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
 
+## Current fork difference: outgoing damaged video boundary and output diagnostics
+
+Date: 2026-10-12. A corrupt outgoing video PES can arrive before source timestamps
+roll back. Native and software admission now retain that boundary provisionally,
+without publishing it or advancing exact-packet history. Paired, distinct replay
+evidence discards the damaged packet and admits the intact returning picture.
+Without that evidence, fresh-video progression, bounded packet lookahead, EOF or
+read failure forward the retained media without erasing admitted source history.
+Earlier intact video/audio remain available during the boundary check. Verified
+queues keep exact packets once and restore per-video decode order when the
+outgoing demuxer releases a late intact picture.
+
+An opt-in `LoadOptions.nativeVideoFrameDiagnostics` observes decoded SDR native
+output without suppressing the player renderer or retaining pixel buffers. Its
+session contract survives in-place item swaps. It separates output gaps from
+sampling delays; pause, seek, background, HDR and external playback are excluded.
+Compressed-video cadence diagnostics run after replay admission on both paths.
+Neither observation requests recovery, changes playback policy or proves what a
+physical display presented. The option defaults off; consumers own activation
+and support-log handling. The CLI exposes `--native-video-frame-diagnostics`.
+
+Changed files: `Video/LivePacketReplayGuard.swift`, `Video/HLSSegmentProducer.swift`,
+`Video/LiveReplayPacketReader.swift`, `Diagnostics/VideoFrameProgress.swift`,
+`Native/NativeAVPlayerHost.swift`, `PlayerState.swift`, `AetherEngine+Loading.swift`,
+`AetherEngine+ReloadWithOptions.swift` and the CLI, tests and public documentation.
+Packet and encoded H.264/AAC MPEG-TS regressions cover damaged boundaries,
+unverified damage, EOF, late outgoing pictures and unchanged source-replay cases.
+Physical-device verification of this iteration remains pending; prior device
+validation below applies to its named revisions. Upstream PRs are unchanged
+until that verification is approved.
+
 ## Current fork difference: cache-hit timing regression coverage
 
 Date: 2026-10-12. The existing slow-serve test incorrectly assumed a cached

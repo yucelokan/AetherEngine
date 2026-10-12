@@ -12,6 +12,13 @@ the public-API contract.
 
 ### Fixed
 
+- **Live damaged transport boundaries:** hold a flagged outgoing video packet until returning
+  media proves replay and can replace it intact. Preserve late good pictures once, in decode
+  order, without moving the DVR timeline backwards or dropping ambiguous fresh media.
+- **Video-progress diagnostics:** opt-in SDR native-loopback output sampling distinguishes
+  decoded-frame gaps, observation delays and compressed-packet timestamp gaps. No automatic
+  seek, source retry, decoder fallback or playback error is introduced.
+
 - **Cached-segment slow-serve regression:** test byte preservation and absence of producer restarts under a deliberately delayed serve, rather than assuming a cache hit always finishes before a wall-clock notification threshold. Runtime behavior is unchanged.
 - **Variable live GOP durations:** when a finalized segment outgrows the sealed
   target duration, renew the playlist URL on the same source and cache. Retired

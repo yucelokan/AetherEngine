@@ -316,6 +316,23 @@ struct LiveSourceReplayTests {
         #expect(result.packetsWrittenCount == 26, "12 initial + 10 changed + 4 trailing pictures")
     }
 
+    @Test("the damaged outgoing video boundary is withheld until its intact replay arrives")
+    func corruptOutgoingVideoBoundary() async throws {
+        let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)
+        var head = clip.head
+        let aud = try #require(head.range(of: Data([0, 0, 0, 1, 9, 0xF0]), options: .backwards))
+        // TS transport-error indicator flags this PES without changing its compressed payload.
+        head[aud.lowerBound / 188 * 188 + 1] |= 0x80
+        let capture = EngineLogCapture()
+        defer { capture.end() }
+        let result = try await run(head + clip.replay + clip.tail, expected: "eof", expectedRebases: 0)
+        let control = try await run(clip.head + clip.tail, expected: "eof", expectedRebases: 0)
+        #expect(result.packetsWrittenCount == control.packetsWrittenCount)
+        #expect(!capture.matching("live damaged boundary held:").isEmpty)
+        #expect(!capture.matching("live damaged packet: stream=video action=discarded").isEmpty)
+        #expect(capture.matching("live damaged packet: stream=video action=forwarded").isEmpty)
+    }
+
     @Test("a corrupt first audio PES is held and discarded only after paired replay is verified")
     func corruptFirstAudioPES() async throws {
         let clip = try fixture(data: Self.audioVideoFixture(), headFrames: 12, replayStartFrame: 2)

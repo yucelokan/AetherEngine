@@ -1111,6 +1111,14 @@ as well.
 
 ## Diagnostics
 
+`LoadOptions.nativeVideoFrameDiagnostics` opts into decoded-frame observation on SDR native
+loopback playback. It defaults to `false`; remote bypass, HDR, external playback, mobile
+background activity, pause and seek are excluded. An additional `AVPlayerItemVideoOutput`
+samples frame timestamps without suppressing the player layer or retaining pixel buffers.
+`EngineLog` reports output progress, gaps/resumption and observation-task delays. A decoded
+output gap is not proof of a physical screen freeze; unavailable output is reported explicitly,
+and the observation never seeks, retries, changes decoder routing or publishes a playback error.
+
 | Symbol | Notes |
 | --- | --- |
 | `AetherEngine.version` | The engine release this source descends from, as the string a published tag carries. SwiftPM resolves a package to a revision rather than to a tag, so an About panel or the header of a diagnostic log has nothing else to name the engine with. Between releases, and under a pin on an unreleased commit, it names the last published version the checkout descends from. |

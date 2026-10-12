@@ -28,6 +28,7 @@ final class LiveReplayPacketReader {
     private let audioIndex: Int32
     private let videoTimeBase: Double
     private let audioTimeBase: Double
+    private var videoProgress = VideoPacketProgress()
 
     init(videoIndex: Int32, audioIndex: Int32, videoTimeBase: Double, audioTimeBase: Double) {
         self.videoIndex = videoIndex
@@ -52,9 +53,11 @@ final class LiveReplayPacketReader {
         deferredError = nil
         videoFrontier = Int64.min; audioFrontier = Int64.min
         guardState.reset()
+        videoProgress = VideoPacketProgress()
     }
 
-    private func finish(verified: Bool) throws {
+    private func finish(verified: Bool, preserveHistory: Bool = false) throws {
+        let preserveHistory = preserveHistory || guardState.isHoldingDamagedBoundary
         if !verified, guardState.confirmedPrefix != nil {
             free(pending); pending.removeAll(); pendingBytes = 0
             throw Failure.interruptedReplay
@@ -64,8 +67,23 @@ final class LiveReplayPacketReader {
             if verified && (entry.duplicate || corrupt) { free([entry]) }
             else { ready.append(entry) }
         }
+        if verified {
+            let order = LivePacketReplayGuard.verifiedPacketOrder(ready.map(\.signature))
+            let kept = Set(order)
+            for index in ready.indices where !kept.contains(index) { free([ready[index]]) }
+            ready = order.map { ready[$0] }
+            for entry in ready {
+                if let signature = entry.signature { guardState.retainForwardedReplayPacket(signature) }
+            }
+        }
         pending.removeAll(keepingCapacity: true); pendingBytes = 0
-        if !verified { guardState.reset() }
+        if !verified {
+            if preserveHistory {
+                guardState.releaseDamagedBoundary()
+                EngineLog.emit("[SWHost] live damaged boundary unconfirmed: forwarding retained packets without resetting source history", category: .swPlayback)
+            }
+            else { guardState.reset() }
+        }
     }
 
     func read(isCurrent: () -> Bool = { true },
@@ -111,7 +129,8 @@ final class LiveReplayPacketReader {
             }
             let decision = signature.map {
                 guardState.inspect($0, sourceSeconds: seconds, timeBaseSeconds: timeBase,
-                    videoFrontier: videoFrontier, audioFrontier: audioFrontier, hasAudio: audioIndex >= 0)
+                    videoFrontier: videoFrontier, audioFrontier: audioFrontier, hasAudio: audioIndex >= 0,
+                    isCorrupt: (packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0)
             }
             if decision?.drop == true, !guardState.isDroppingReplay, decision?.event == nil {
                 var duplicate: UnsafeMutablePointer<AVPacket>? = packet
@@ -120,12 +139,17 @@ final class LiveReplayPacketReader {
             }
             let entry = Pending(packet: packet, signature: signature, seconds: seconds,
                                 duplicate: decision?.drop ?? false)
-            if guardState.isDroppingReplay || decision?.event != nil || !pending.isEmpty {
+            if guardState.isDroppingReplay || decision?.holdDamagedBoundary == true || decision?.event != nil
+                || (!pending.isEmpty && !guardState.isHoldingDamagedBoundary) {
                 if signature == nil, (packet.pointee.flags & AV_PKT_FLAG_CORRUPT) != 0 {
                     guardState.noteDamagedPacket()
                 }
                 pending.append(entry); pendingBytes += max(0, Int(packet.pointee.size))
                 switch decision?.event {
+                case .damagedBoundaryHeld:
+                    EngineLog.emit("[SWHost] live damaged boundary held: sourceSeconds=\(String(format: "%.3f", seconds)); waiting for replay evidence before publishing video", category: .swPlayback)
+                case .damagedBoundaryForwarded:
+                    try finish(verified: false, preserveHistory: true)
                 case .finished(let video, let audio, let duration):
                     try finish(verified: true)
                     EngineLog.emit("[SWHost] live source overlap resolved: removed \(video) video + \(audio) audio packets across \(String(format: "%.2f", duration))s; preserving DVR timeline", category: .swPlayback)
@@ -148,6 +172,9 @@ final class LiveReplayPacketReader {
 
     private func admit(_ entry: Pending) {
         guard let signature = entry.signature else { return }
+        if signature.stream == .video, let gap = videoProgress.observe(entry.seconds) {
+            EngineLog.emit("[VideoPacketProgress] event=gap route=software previous=\(String(format: "%.3f", gap.previous)) dts=\(String(format: "%.3f", entry.seconds)) gap=\(String(format: "%.3f", gap.seconds)) cadence=\(String(format: "%.3f", gap.cadence))", category: .swPlayback)
+        }
         guardState.record(signature, sourceSeconds: entry.seconds)
         if signature.stream == .video { videoFrontier = signature.dts }
         else { audioFrontier = signature.dts }

@@ -17,6 +17,23 @@ This record identifies the modification dates and source files. These are genera
 APIs and fixes; application UI, support reporting, provider settings and
 application resource budgets do not belong here.
 
+## Unflagged replay boundary and progressing-audio video stalls
+
+A real byte-truncated transport replay could retain an unflagged partial outgoing
+picture and its intact returning copy at identical DTS/PTS. The verified pending
+batch now emits only the returning video picture, before monotonic timestamp repair.
+Native and software admission share the correction. Native VideoToolbox and software
+regressions compare full decoded pictures for damaged ordinary and keyframe seams.
+Untimed outgoing fragments stay quarantined with the damaged boundary; verified replay
+discards them before timestamp synthesis can advance the admitted frontier. Ambiguous
+boundaries still forward every packet.
+
+`nativeVideoFrameRecovery` is an explicit opt-in, separate from observational frame
+diagnostics. It extends bounded same-position presentation recovery to ready layers
+with sustained, freshly observed decoded-output stalls. Healthy pictures, not only a
+ready flag, rearm recovery. Numeric replay-boundary diagnostics distinguish replaced,
+unreplaced and superseded pictures. See [device evidence and reproduction](docs/validation/live-video-progress.md).
+
 ## Native video presentation recovery
 
 Date: 2026-10-12. Native playback now distinguishes an advancing item/audio clock

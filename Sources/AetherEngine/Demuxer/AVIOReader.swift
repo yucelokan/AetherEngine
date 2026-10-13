@@ -434,6 +434,15 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         }
     }
 
+    /// Charges a 429/503/509 to the origin. `parseRetryAfter` reads an absent header as 0, which has
+    /// to reach the budget as nil: a zero would arm a quiet period of nothing instead of the ladder.
+    private func noteRateLimitedResponse(_ response: HTTPURLResponse?) {
+        guard let response, Self.isRateLimitStatus(response.statusCode) else { return }
+        let retryAfter = Self.parseRetryAfter(response)
+        noteOriginRefusal(status: response.statusCode, retryAfter: retryAfter > 0 ? retryAfter : nil,
+                          respondedBy: response.url)
+    }
+
     /// #377: true when this origin is down to one request at a time, so the reader's speculative
     /// parallel paths must not run. They exist to overlap with the pump, overlapping is the one
     /// thing a single-slot origin refuses, and each has a serial fallback that is merely slower.
@@ -815,6 +824,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     /// Detour blocks currently resident.
     var detourResidentBlocksForTesting: Int { detourCache.residentCount }
+
+    /// One detour block fetch, true when it came back rate limited.
+    func detourFetchIsRateLimitedForTesting(from offset: Int64, size: Int) -> Bool {
+        if case .rateLimited = detourFetchBlock(from: offset, size: size) { return true }
+        return false
+    }
 
     /// The most the forward-only streaming buffer has held at once.
     var streamPeakBufferBytesForTesting: Int {
@@ -1417,6 +1432,17 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
         }
 
+        // AE#733: the AE#140/#154 classification above only reads the persistent window, and a
+        // forward-only open (no size, or an origin that ignores Range) leaves that window empty. A
+        // playlist endpoint answering 200 without a length lands exactly there, so the same check
+        // runs on the stream's first bytes before FFmpeg is handed the m3u8 as container bytes.
+        if isStreaming, Self.bodyBeginsWithHLSPlaylistTag(firstStreamPrefix()) {
+            EngineLog.emit("[AVIOReader] \(label) HLS playlist body on the forward-only open (AE#733); rerouting like AE#140/#154.", category: .demux)
+            markClosed()
+            close()
+            throw isLive ? AVIOReaderError.hlsPlaylistOnRawLivePath : AVIOReaderError.hlsPlaylistOnVODPath
+        }
+
         // #126: a VOD source that finishes open() without a resolved size runs the forward-only
         // streaming reader; FFmpeg must not believe pb is seekable. With a seekable-flagged pb the
         // mov demuxer far-forward-skips to a tail moov (buffering the entire skipped span in RAM),
@@ -1556,6 +1582,14 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { winCond.unlock() }
         let n = Swift.min(max, window.count)
         return window.prefix(n)
+    }
+
+    /// Leading bytes of the forward-only stream at open, before any read has consumed them.
+    private func firstStreamPrefix(max: Int = 16) -> [UInt8] {
+        streamLock.lock()
+        defer { streamLock.unlock() }
+        guard streamBytesRead == 0 else { return [] }
+        return streamBuffer.prefix(max)
     }
 
     /// True when a body's leading bytes are the HLS playlist tag `#EXTM3U`, tolerating a UTF-8 BOM and
@@ -2787,11 +2821,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 slotWait: min(budget, Self.shortFetchSlotWaitSeconds))
             if let http = response as? HTTPURLResponse {
                 let status = http.statusCode
+                // Already charged to the origin by `syncRequest`, before it returned the slot.
                 if Self.isRateLimitStatus(status) {
-                    let retryAfter = Self.parseRetryAfter(http)
-                    noteOriginRefusal(status: status, retryAfter: retryAfter > 0 ? retryAfter : nil,
-                                      respondedBy: http.url)
-                    return .rateLimited(retryAfter)
+                    return .rateLimited(Self.parseRetryAfter(http))
                 }
                 if status != 200 && status != 206 {
                     if Self.isResolvedExpiryStatus(status) { invalidateResolvedURL() }
@@ -4257,10 +4289,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         task.delegate = delegate
         let completion = DispatchSemaphore(value: 0)
         delegate.onCompletion = { [weak self] response in
-            if let response, Self.isRateLimitStatus(response.statusCode) {
-                self?.noteOriginRefusal(status: response.statusCode,
-                    retryAfter: Self.parseRetryAfter(response), respondedBy: response.url)
-            }
+            self?.noteRateLimitedResponse(response)
             lease.release()
             completion.signal()
         }
@@ -4325,10 +4354,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         let semaphore = DispatchSemaphore(value: 0)
         delegate.onCompletion = { [weak self] response in
-            if let response, Self.isRateLimitStatus(response.statusCode) {
-                self?.noteOriginRefusal(status: response.statusCode,
-                    retryAfter: Self.parseRetryAfter(response), respondedBy: response.url)
-            }
+            self?.noteRateLimitedResponse(response)
             lease.release()
             semaphore.signal()
         }
@@ -4628,10 +4654,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         let semaphore = DispatchSemaphore(value: 0)
         delegate.onCompletion = { [weak self] response in
-            if let response, Self.isRateLimitStatus(response.statusCode) {
-                self?.noteOriginRefusal(status: response.statusCode,
-                    retryAfter: Self.parseRetryAfter(response), respondedBy: response.url)
-            }
+            self?.noteRateLimitedResponse(response)
             lease.release()
             semaphore.signal()
         }

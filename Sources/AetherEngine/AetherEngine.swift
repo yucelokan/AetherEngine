@@ -571,8 +571,8 @@ public final class AetherEngine: ObservableObject {
     @Published public internal(set) var sourceDVProfile: Int? = nil
 
     /// The Dolby Vision profile rewrite applied to the served stream, nil when the session serves the source's
-    /// own profile (or no Dolby Vision). `.profile7ToProfile81` on a Profile 7 source played on a display
-    /// presenting Dolby Vision, where `videoFormat` reads `.dolbyVision` and `sourceDVProfile` keeps 7.
+    /// own profile (or no Dolby Vision). `.profile7ToProfile81` on every Profile 7 source not served as its
+    /// base layer, whatever the display; `sourceDVProfile` keeps 7.
     @Published public internal(set) var dolbyVisionConversion: DolbyVisionConversion? = nil
 
     /// A HDR10+ (ST 2094-40) T.35 payload was seen in this session's video, whatever the source's format.
@@ -1080,6 +1080,7 @@ public final class AetherEngine: ObservableObject {
 
     func noteMediaServicesReset(lost: Bool) {
         mediaServicesResetPending = true
+        dropAtmosOutputActivator()
         EngineLog.emit(
             "[AetherEngine] #597 media services were \(lost ? "lost" : "reset"): every audio and "
             + "video object this process holds is invalid, so the next load builds fresh native and "
@@ -1146,17 +1147,26 @@ public final class AetherEngine: ObservableObject {
     /// - keepVideoAlive: result of shouldKeepVideoAlive / shouldKeepVideoAliveTV.
     /// - pipActive: a live PiP window renders the SW layer's frames, so the SW host must keep
     ///   decoding video in background instead of dropping to audio-only (SW-PiP Phase A).
+    /// - softwareHostHasAudio: AE#739, the SW host renders audio of its own. Audio-only mode paces the
+    ///   demux loop on the audio renderer alone, so without audio nothing paces it: the loop dropped
+    ///   the rest of the file within moments and parked the clock at end of media in the background.
+    ///   Such a session has nothing to keep playing and is released like a paused one.
     nonisolated static func backgroundAction(
         isAudioBackend: Bool,
         hasSoftwareHost: Bool,
+        softwareHostHasAudio: Bool,
         keepVideoAlive: Bool,
         pipActive: Bool,
         state: PlaybackState
     ) -> BackgroundAction {
         if isAudioBackend { return .doNothing }
         if keepVideoAlive {
-            if hasSoftwareHost { return pipActive ? .doNothing : .enterSoftwareAudioOnly }
-            return .doNothing
+            if hasSoftwareHost {
+                if pipActive { return .doNothing }
+                if softwareHostHasAudio { return .enterSoftwareAudioOnly }
+            } else {
+                return .doNothing
+            }
         }
         guard state == .playing || state == .paused else { return .doNothing }
         return .teardownVideo
@@ -1478,7 +1488,9 @@ public final class AetherEngine: ObservableObject {
     /// Bounded recovery could not find new media after a verified replay. Cached DVR media
     /// remains readable, but automatic `load` would discard its history and permit the same
     /// broadcast to play again. The host can retry with `retryLiveSourceRecovery()` after
-    /// its own backoff; this is not a codec failure. Subscribe per session.
+    /// its own backoff; this is not a codec failure. Fires only under
+    /// `LoadOptions.hostRetriesExhaustedLiveReplay`; otherwise the exhaustion is a `liveSourceReset`.
+    /// Subscribe per session.
     public let liveSourceReplayExhausted = PassthroughSubject<Void, Never>()
 
     /// Resume a parked live source without replacing the consumer item, DVR cache or replay
@@ -2754,12 +2766,17 @@ public final class AetherEngine: ObservableObject {
         }
         masterFallbackUsed = true
         // AE#459: the display answered. Display-rejection codes only, never the -1002 parse failure.
-        // AE#535: and only while the display is eligible for HDR, or the answer is about the window.
+        // AE#535: and only for an HDR master on an HDR-eligible display, or the answer is about the window.
         if MasterFallbackDecision.isDisplayRejectionCode(rejection.code), !Self.panelRefusedHDRMaster {
             let eligibleNow = AVPlayer.eligibleForHDRPlayback
             let switching = displayCriteria.displayModeSwitchInProgress
-            if MasterFallbackDecision.shouldLatchPanelRefusal(
-                code: rejection.code, displayEligibleForHDRNow: eligibleNow,
+            if !session.servedSourceIsHDR {
+                EngineLog.emit(
+                    "[DisplayCriteria] SDR master refused (code=\(rejection.code)); this item falls back, "
+                    + "an SDR refusal does not latch the HDR route (#535)",
+                    category: .engine)
+            } else if MasterFallbackDecision.shouldLatchPanelRefusal(
+                code: rejection.code, servedMasterIsHDR: true, displayEligibleForHDRNow: eligibleNow,
                 displaySwitchInProgress: switching) {
                 Self.panelRefusedHDRMaster = true
                 EngineLog.emit(
@@ -3148,8 +3165,8 @@ public final class AetherEngine: ObservableObject {
     ///   whose seekable end IS the playhead, so the distance-behind-live that policy reads is zero and it
     ///   would aim at the edge, discarding the rewind the viewer kept through the whole outage.
     func reloadStalledConsumerItem(position: Double, allowPausedConsumer: Bool = false,
-                                   liveRejoinOverride: Double? = nil, replacementURL: URL? = nil,
-                                   preserveLivePosition: Double? = nil) {
+                                   liveRejoinOverride: Double? = nil,
+                                   preserveLivePosition: Double? = nil, replacementURL: URL? = nil) {
         guard let host = nativeHost, let player = currentAVPlayer,
               let url = replacementURL ?? (player.currentItem?.asset as? AVURLAsset)?.url else { return }
         // Item death parks tcs at .paused; only that trigger may bypass the user-pause guard.
@@ -4695,9 +4712,11 @@ public final class AetherEngine: ObservableObject {
             tracks: probedAudioTracks,
             override: audioSourceStreamIndex,
             preferredLanguages: options.preferredAudioLanguages,
-            // Only where the spatial bridge can run: the loopback route of a VOD video session. Live,
-            // audio-only and the software path would decode TrueHD for its 7.1 bed and no heights.
-            prefersTrueHDAtmos: options.objectAudioRendering != .off && !options.isLive && !options.audioOnly
+            // Only where the spatial bridge can run: the loopback route of a VOD video session on an OS
+            // with the APAC encoder. Live, audio-only, the software path and older systems would decode
+            // TrueHD or DTS for its 7.1 bed and no heights, so the default track keeps its place there.
+            prefersObjectAudio: options.objectAudioRendering != .off && ObjectAudioRendering.isAvailable
+                && !options.isLive && !options.audioOnly
                 && !VideoRoutingPolicy.requiresSoftwarePath(
                     codecID: detectedCodecID, fieldOrder: detectedFieldOrder,
                     av1Available: VTCapabilityProbe.av1Available),
@@ -6491,8 +6510,12 @@ public final class AetherEngine: ObservableObject {
         didSet {
             observeExternalPlayback()
             observeCurrentItem()
+            followAtmosOutput()
         }
     }
+
+    /// Keeps the HDMI route in Atmos while `currentAVPlayer` plays APAC (tvOS; see `followAtmosOutput`).
+    var atmosOutputActivator: AtmosOutputActivator?
 
     /// Item currently loaded into `currentAVPlayer` (#260). Published separately because items are swapped in
     /// place (`replaceCurrentItem`, on every audio-track reload and episode autoplay) without the player itself
@@ -7925,6 +7948,7 @@ public final class AetherEngine: ObservableObject {
         let action = Self.backgroundAction(
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
+            softwareHostHasAudio: softwareHost?.audioDelivery == .decoded,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
             state: state
@@ -7940,6 +7964,10 @@ public final class AetherEngine: ObservableObject {
         case .perform(.enterSoftwareAudioOnly):
             softwareHost?.enterBackgroundAudioOnly()
         case .perform(.teardownVideo):
+            if keepAlive {
+                EngineLog.emit("[AetherEngine] AE#739 the software host renders no audio, releasing it "
+                               + "instead of entering background audio-only", category: .engine)
+            }
             await teardownVideoForBackground()
         case .deferTeardown(let seconds):
             #if os(iOS)
@@ -8052,6 +8080,7 @@ public final class AetherEngine: ObservableObject {
         return Self.backgroundAction(
             isAudioBackend: audioAVPlayerActive || audioHost != nil,
             hasSoftwareHost: softwareHost != nil,
+            softwareHostHasAudio: softwareHost?.audioDelivery == .decoded,
             keepVideoAlive: keepAlive,
             pipActive: pictureInPictureActive,
             state: state

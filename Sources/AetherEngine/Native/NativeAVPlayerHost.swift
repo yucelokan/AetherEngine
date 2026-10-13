@@ -2245,6 +2245,9 @@ final class NativeAVPlayerHost {
     }
 
     private func observeVideoPresentation(clock: Double) {
+        // Both halves are opt-in: an unready layer after an in-place swap can be an audio-first
+        // join waiting for its IDR, which no host asked the engine to repair or to log.
+        guard sessionContract.nativeVideoFrameRecovery || sessionContract.nativeVideoFrameDiagnostics else { return }
         var foreground = true
         #if os(iOS) || os(tvOS) || os(visionOS)
         foreground = UIApplication.shared.applicationState == .active
@@ -2283,7 +2286,7 @@ final class NativeAVPlayerHost {
             let reason = !isVideoReadyForDisplay ? "layer_unready" : (frozenOutput || stalled ? "output_stalled" : "none")
             EngineLog.emit("[NativeVideoHealth] action=\(phase) sid=\(sessionID) clock=\(String(format: "%.3f", clock)) buffer=\(String(format: "%.3f", ahead)) layerReady=\(isVideoReadyForDisplay) frameAge=\(String(format: "%.3f", age ?? -1)) samples=\(videoFrameProgress.samples) attempt=\(videoPresentation.attempts) pip=\(pictureInPictureActive) foreground=\(foreground) eligible=\(eligible) reason=\(reason) repairEnabled=\(sessionContract.nativeVideoFrameRecovery)", category: .engine)
         }
-        if let action {
+        if let action, sessionContract.nativeVideoFrameRecovery {
             if stalled { videoFrameProgress.beginRecovery() }
             onVideoPresentationRecovery?(action, clock)
         }
@@ -2952,13 +2955,16 @@ final class NativeAVPlayerHost {
                 break
             }
         }
-        guard !codecID.isEmpty, trackChannels > 2 else { return }
+        guard !codecID.isEmpty else { return }
         let session = AVAudioSession.sharedInstance()
         let routeChannels = max(
             session.currentRoute.outputs.first?.channels?.count ?? 0,
             session.outputNumberOfChannels
         )
-        guard routeChannels > 0, routeChannels < trackChannels else { return }
+        guard surroundDownmixSuspected(
+            trackChannels: trackChannels, routeChannels: routeChannels,
+            maximumRouteChannels: session.maximumOutputNumberOfChannels
+        ) else { return }
         EngineLog.emit(
             "[NativeAVPlayerHost] #\(sid) WARNING: \(codecID) \(trackChannels)-channel "
             + "track playing into a \(routeChannels)-channel route. tvOS will downmix to "
@@ -2973,6 +2979,16 @@ final class NativeAVPlayerHost {
             category: .session
         )
         #endif
+    }
+
+    /// PR #740 device round: after an APAC session tvOS keeps the HDMI output in the 2-channel MAT carrier it
+    /// negotiated, so a following 5.1 `ec-3` item reads `output=2` while the sink still advertises `max=32`
+    /// and plays the 5.1 intact. Only a sink whose advertised maximum is below the track is a downmix.
+    nonisolated static func surroundDownmixSuspected(
+        trackChannels: Int, routeChannels: Int, maximumRouteChannels: Int
+    ) -> Bool {
+        guard trackChannels > 2, routeChannels > 0, routeChannels < trackChannels else { return false }
+        return maximumRouteChannels < trackChannels
     }
 
     /// Dump audio route channel capability post-load (route renegotiates on asset load; pre-load poll is stale). outputNumberOfChannels is the actual LPCM limit; EAC3/Atmos bypasses it via bitstream tunnel.

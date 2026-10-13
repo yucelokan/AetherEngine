@@ -92,7 +92,7 @@ A seek holds the last frame on screen rather than blanking it. `SampleBufferRend
 
 AV1+DV (Profile 10.0 / 10.1 / 10.4) routes through the native path on hardware-AV1 hosts via the `dav1` / `av01` track type plus the source's `dvvC` box. AV1+Atmos is genuinely rare in the wild (mastering still runs in HEVC overwhelmingly), so the SW pipeline's lack of Atmos passthrough is a theoretical limitation rather than a real one. AV1 capability registration is lazy and runs only when routing an AV1 source; loading H.264, HEVC or audio-only content does not consult it. The dispatch happens once at load time; hosts see a unified `@Published` state surface either way.
 
-**Background audio (iOS).** When the app backgrounds while playing, the engine keeps audio going rather than tearing the pipeline down. The decision is a pure, unit-tested policy, `backgroundAction(isAudioBackend:hasSoftwareHost:keepVideoAlive:state:)`, driven from the `UIApplication` lifecycle observers; `keepVideoAlive` comes from `shouldKeepVideoAlive(enabled:pipActive:state:)` and is gated to iOS (tvOS always tears down, wedge-safe: a frozen decode session crossing a multi-hour suspension wedged `mediaserverd`). On the native path "keep audio alive" is just declining to tear down: `AVPlayer` under the `.playback` session keeps decoding. The software path has no `AVPlayer`, and its combined demux loop normally paces the whole loop (audio and video) on the video renderer's `isReadyForMoreMediaData`; once `AVSampleBufferDisplayLayer` stops draining in the background that gate never reopens and audio would starve. So the host enters `backgroundAudioOnly`: the loop drops video packets and paces on the audio renderer (`AudioOutput.isReadyForMoreMediaData`) instead, keeping `AVSampleBufferAudioRenderer` fed and the synchronizer advancing. On foreground return the flag clears, the video decoder and renderer flush, and video resyncs at the next keyframe with audio uninterrupted. Scope is the combined VOD loop (and live-without-DVR, which shares it); the DVR feeder loop is unchanged. Exercise it headless with `aetherctl bgaudio` (see [cli.md](cli.md)).
+**Background audio (iOS).** When the app backgrounds while playing, the engine keeps audio going rather than tearing the pipeline down. The decision is a pure, unit-tested policy, `backgroundAction(isAudioBackend:hasSoftwareHost:softwareHostHasAudio:keepVideoAlive:pipActive:state:)`, driven from the `UIApplication` lifecycle observers; `keepVideoAlive` comes from `shouldKeepVideoAlive(enabled:pipActive:state:)` and is gated to iOS (tvOS always tears down, wedge-safe: a frozen decode session crossing a multi-hour suspension wedged `mediaserverd`). On the native path "keep audio alive" is just declining to tear down: `AVPlayer` under the `.playback` session keeps decoding. The software path has no `AVPlayer`, and its combined demux loop normally paces the whole loop (audio and video) on the video renderer's `isReadyForMoreMediaData`; once `AVSampleBufferDisplayLayer` stops draining in the background that gate never reopens and audio would starve. So the host enters `backgroundAudioOnly`: the loop drops video packets and paces on the audio renderer (`AudioOutput.isReadyForMoreMediaData`) instead, keeping `AVSampleBufferAudioRenderer` fed and the synchronizer advancing. On foreground return the flag clears, the video decoder and renderer flush, and video resyncs at the next keyframe with audio uninterrupted. A software host that renders no audio of its own never enters this mode (AE#739): the loop would have nothing to pace on and would drop the rest of the file within moments, parking the clock at end of media in the background, so such a session is released like a paused one and reloaded on return. The VideoToolbox session is rebuilt on every foreground return, because an iOS screen lock invalidates it and in audio-only mode nothing decodes video to notice. A loss observed while video is wanted (`kVTInvalidSessionErr` from a decode) is reported by `HardwareVideoDecoder.onSessionLost`; the host rebuilds the session and repositions to the playhead so the picture returns on the frame the audio is at, and owes the recovery to the next foreground return when it happens in the background or VT refuses the rebuild. Scope is the combined VOD loop (and live-without-DVR, which shares it); the DVR feeder loop is unchanged. Exercise it headless with `aetherctl bgaudio` (see [cli.md](cli.md)).
 
 **Live audio look-ahead + edge rebuffer (#107 audio chopping).** The DVR feeder loop shares the pacing coupling above: audio is interleaved behind the video renderer's back-pressure gate, so the audio renderer could never hold more than the video queue allows (<1 s measured). On devices where software 1080i decode + deinterlace runs near real time that margin is zero and every feeder stall is an audible dropout. The feeder therefore runs an audio look-ahead pump (`AudioLookaheadPolicy` + `AudioLookaheadState`): an independent ring cursor that decodes and enqueues audio packets ahead of the combined cursor until the renderer holds `targetLeadSeconds` (4 s) over the synchronizer clock, making audio delivery independent of video decode pace (a chronically slow video decode now degrades to late video frames under smooth audio, the right priority). DVR seeks reset the pump cursor alongside `setFeedCursor` (compare-and-set, seek wins). The same pump pass handles live-edge source underruns: when the source itself delivers below real time and the pump drains the ring at the edge, the free-running clock would otherwise outrun the stream permanently (every later sample lands in the clock's past, continuous chopping that never recovers). `AudioLookaheadPolicy.clockAction` pauses the clock at `underrunPauseLeadSeconds`, refills, and resumes at `rebufferResumeLeadSeconds`, mirroring AVPlayer's stall handling on the native path. A host seek does not ask the pump to do that on purpose: a software live landing nearer the reader's frontier than `rebufferResumeLeadSeconds` is held that far back (`AetherEngine.softwareLiveLanding`, Sodalite#104 round 3), because on a real-time source the lead arrives exactly as slowly as it is deep, so a landing at the frontier parks the clock for that long and resumes at the same distance behind it that the held-back landing starts from. Diagnose with `aetherctl play --audio-stats` (see [cli.md](cli.md)).
 
@@ -162,6 +162,27 @@ Routes the host did not ask for:
 
 Branch on this where host behaviour differs per pipeline: who draws subtitles (AVPlayer on the bypass, the host's renderer on loopback and software), and whether a composited PiP overlay is meaningful at all. Observing it also makes the mid-session reroute an event rather than a log line.
 
+## Byte-reader callback scheduling
+
+The AVIO reader, held HTTP transport and prewarm fetcher use independent serial
+user-initiated URLSession delegate queues. These callbacks deliver playback bytes
+and release origin-request tickets needed by foreground demux threads. A semaphore
+wait cannot donate priority to an implicit utility callback queue. Held transport
+work also runs at user-initiated QoS.
+
+Finite AVIO requests release their ticket in the completion callback, before the
+synchronous caller resumes to process its result. A lock-guarded lease makes that
+release idempotent against cancellation, early return and deallocation. Refusal
+responses are charged to the origin before handing its slot to another reader. Persistent
+and prewarm callbacks already return their tickets at completion. Per-origin caps,
+FIFO ordering, pacing, cancellation drains and timeout/overcommit policy remain
+unchanged; each session retains its own serial callback ordering.
+
+QoS is not an execution deadline. A VOD segment already in the cache may still
+cross the slow-serve threshold while its serving thread is delayed. Its early
+chunked header remains valid: the response carries the same cached bytes, and
+the notification alone does not restart the producer.
+
 ## Live replay boundary and video diagnostics
 
 Live packet admission also protects the outgoing transport boundary. A timed, flagged video
@@ -190,27 +211,6 @@ resident buffer and an attached foreground surface; it does not reset source his
 DVR viewer to the live edge. In-place item replacement preserves the repair budget, which only
 rearms after sustained healthy presentation. Encoded long-GOP H.264/AAC replay tests decode both
 admitted software packets and remuxed fragments and compare every picture with the original.
-
-## Byte-reader callback scheduling
-
-The AVIO reader, held HTTP transport and prewarm fetcher use independent serial
-user-initiated URLSession delegate queues. These callbacks deliver playback bytes
-and release origin-request tickets needed by foreground demux threads. A semaphore
-wait cannot donate priority to an implicit utility callback queue. Held transport
-work also runs at user-initiated QoS.
-
-Finite AVIO requests release their ticket in the completion callback, before the
-synchronous caller resumes to process its result. A lock-guarded lease makes that
-release idempotent against cancellation, early return and deallocation. Refusal
-responses are charged to the origin before handing its slot to another reader. Persistent
-and prewarm callbacks already return their tickets at completion. Per-origin caps,
-FIFO ordering, pacing, cancellation drains and timeout/overcommit policy remain
-unchanged; each session retains its own serial callback ordering.
-
-QoS is not an execution deadline. A VOD segment already in the cache may still
-cross the slow-serve threshold while its serving thread is delayed. Its early
-chunked header remains valid: the response carries the same cached bytes, and
-the notification alone does not restart the producer.
 
 ## Software VOD compressed packet cache
 
@@ -607,8 +607,8 @@ new media continues on the existing timeline.
 A reconnect can truncate a transport/PES packet. Immediately forwarding a whole
 candidate after one mismatch replayed old pictures; immediately reopening after
 that mismatch repeatedly met the same damaged boundary. A short unmatched run
-including the first packet of either track is quarantined for at most 0.5 seconds
-of source time and 64 unmatched packets per track. Before any exact match on a
+including the first packet of either track is quarantined within a bounded
+source-time interval and unmatched-packet count per track. Before any exact match on a
 track, the first unmatched timestamp anchors that bound. Untimed packets remain
 under the producer's overall byte/packet limits and source watchdog. Later exact matches, or crossing that track's old
 frontier, complete the interval; discarding a candidate containing gaps also
@@ -628,7 +628,8 @@ recognition.
 The cutter watchdog distinguishes a bounded overlap scan from a stuck cut while
 still detecting source starvation. The guard belongs to the producer thread.
 Repeated source loss parks acquisition after the existing bounded reopen budget.
-`liveSourceReplayExhausted` hands the retry timing to the host, which can call
+For a host that opted in with `hostRetriesExhaustedLiveReplay`,
+`liveSourceReplayExhausted` hands the retry timing to it, and it can call
 `retryLiveSourceRecovery()` without replacing the cache or consumer item. Stop or
 replacement revokes the pending retry, duplicate requests coalesce, and resumed
 production restores the provider's blocking-reload capability. Application
@@ -640,30 +641,11 @@ Corrupt packets are held in source order during a candidate; a completed paired
 verification discards damaged boundary packets even when their usable timestamps
 are already past one track's retained frontier. Ambiguous candidates preserve their
 packets. This does not discard arbitrary damaged packets during normal playback
-or reset a decoder on a transport warning. Per-track/action diagnostics log the
-first three corrupt packets and every 64th thereafter, with source timestamps or
+or reset a decoder on a transport warning. Per-track/action diagnostics are rate-limited and include source timestamps or
 `missing`, never URLs. `forwarded` means the packet reached the normal pump path,
 not that a corrupt picture was displayed. Native `LagDiag` clock progress follows
 the AVPlayer clock; `videoFrames=unavailable` explicitly records that it is not a
 rendered-frame counter, and unavailable drop counts use `-` instead of zero.
-
-
-### Live playlist renewal after a longer GOP
-
-The first live media playlist seals its target duration. If a later finalized
-segment's serialized `EXTINF`, rounded to an integer, exceeds that value, the
-provider creates a new `live-N/` playlist namespace with a larger seal. The old
-video and subtitle URLs keep their original target and retain the end index before
-an oversized segment, even after that segment leaves the live window. Relative segment/init/subtitle URLs resolve within either
-namespace to the same retained cache; source acquisition is not reopened.
-
-The native consumer swaps to the renewed URL using the existing in-place reload
-and playlist placement machinery. The viewing position and play/pause intent
-are carried across the swap, including a DVR position behind live. A renewal
-never repeats an already completed startup cushion wait. The change does not
-cut a GOP at a dependent frame or falsify a segment's duration. A consumer item
-replacement can still cause a short interruption; missing source frames cannot
-be reconstructed by this policy.
 
 ### Software live replay admission and recovery
 
@@ -681,3 +663,20 @@ threshold. This settling tail never discards different compressed bytes solely
 because their timestamps repeat. During a DVR cursor recovery, acquisition waits
 before appending another packet so it cannot evict the target while decoders and
 clocks are being repositioned. Memory/disk retention caps remain in force.
+
+### Live playlist renewal after a longer GOP
+
+The first live media playlist seals its target duration. If a later finalized
+segment's serialized `EXTINF`, rounded to an integer, exceeds that value, the
+provider creates a new `live-N/` playlist namespace with a larger seal. The old
+video and subtitle URLs keep their original target and retain the end index before
+an oversized segment, even after that segment leaves the live window. Relative segment/init/subtitle URLs resolve within either
+namespace to the same retained cache; source acquisition is not reopened.
+
+The native consumer swaps to the renewed URL using the existing in-place reload
+and playlist placement machinery. The viewing position and play/pause intent
+are carried across the swap, including a DVR position behind live. A renewal
+never repeats an already completed startup cushion wait. The change does not
+cut a GOP at a dependent frame or falsify a segment's duration. A consumer item
+replacement can still cause a short interruption; missing source frames cannot
+be reconstructed by this policy.

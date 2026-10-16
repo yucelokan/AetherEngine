@@ -57,8 +57,8 @@ public enum SourceNetworkDiagnostics {
         func redirect(task: URLSessionTask, response: HTTPURLResponse, request: URLRequest) {
             handler?(event("redirect", task: task, url: request.url, status: response.statusCode))
         }
-        func completed(task: URLSessionTask, error: Error?) {
-            handler?(event("completed", task: task, error: error))
+        func completed(task: URLSessionTask, error: Error?, phase: String = "completed") {
+            handler?(event(phase, task: task, error: error))
         }
         func metrics(task: URLSessionTask, metrics: URLSessionTaskMetrics) {
             guard let receive = handler else { return }

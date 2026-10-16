@@ -44,10 +44,33 @@ struct PlaybackErrorInfoTests {
     }
 
     @MainActor
-    @Test("A live HLS join that reaches nothing publishes an unavailable live source", .timeLimit(.minutes(1)))
+    @Test("A live HLS join retains the actual connection error", .timeLimit(.minutes(1)))
     func unreachableLiveJoinIsUnavailable() async throws {
         let observed = try await failedLiveIngestLoad(try #require(URL(string: "http://127.0.0.1:1/live/1.m3u8")))
-        #expect(observed?.kind == .liveSourceUnavailable)
+        #expect(observed?.kind == .sourceOpenFailed)
+        #expect(observed?.underlyingDomain == NSURLErrorDomain)
+        #expect(observed?.underlyingCode == NSURLErrorCannotConnectToHost)
+    }
+
+    @MainActor
+    @Test("HLS format limits, invalid bodies and key HTTP refusals stay distinct")
+    func hlsFailureClassification() throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        for (error, kind, code) in [
+            (HLSIngestError.unsupportedSegmentFormat, PlaybackErrorKind.hlsFormatUnsupported, 5),
+            (.encryptedNotSupported, .hlsFormatUnsupported, 3),
+            (.playlistInvalid(reason: "private"), .hlsIngestFailed, 2),
+            (.segmentDecryptFailed(reason: "private"), .hlsIngestFailed, 4),
+            (.playlistUnreachable(status: 403), .sourceRefused, 403)
+        ] {
+            engine.publishLoadFailure(error)
+            #expect(engine.errorInfo?.kind == kind)
+            #expect(engine.errorInfo?.underlyingCode == code)
+        }
+        engine.publishLoadFailure(URLError(.secureConnectionFailed))
+        #expect(engine.errorInfo?.underlyingDomain == NSURLErrorDomain)
+        #expect(engine.errorInfo?.underlyingCode == -1200)
     }
 
     /// Loads `url` live through the engine's own HLS ingest, as a known HLS playlist on the live path

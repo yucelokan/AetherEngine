@@ -32,7 +32,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     private var started = false
     private var closed = false
     // All _-prefixed vars are protected by startLock.
-    private var _terminalError: HLSIngestError?
+    private var _terminalFailure: Error?
     /// Written before any segment byte reaches the FIFO; first write wins.
     private var _upstreamTargetDuration: Double?
     /// Tracks observed segment-arrival cadence for LL-HLS shaping (AetherEngine#167). Updated whenever new
@@ -87,7 +87,11 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     private var sniffedFirstSegment = false
 
     public var terminalError: HLSIngestError? {
-        startLock.withLock { _terminalError }
+        terminalFailure as? HLSIngestError
+    }
+
+    var terminalFailure: Error? {
+        startLock.withLock { _terminalFailure }
     }
 
     public var upstreamTargetDuration: Double? {
@@ -378,14 +382,14 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         } catch is CancellationError {
             // teardown
         } catch let error as HLSIngestError {
-            startLock.withLock { _terminalError = error }
+            startLock.withLock { _terminalFailure = error }
             EngineLog.emit("[HLSIngest] terminal: \(error)", category: .engine)
             fifo.cancel()
         } catch {
             if Task.isCancelled || (error as? URLError)?.code == .cancelled {
                 return // teardown rides through as cancellation, not a terminal error
             }
-            startLock.withLock { _terminalError = .playlistUnreachable(status: -1) }
+            startLock.withLock { _terminalFailure = error }
             EngineLog.emit("[HLSIngest] terminal (transport): \(error.localizedDescription)", category: .engine)
             fifo.cancel()
         }
@@ -790,7 +794,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     }
 
     private func fetchSegment(_ url: URL, duration: Double) async throws -> Data {
-        var lastStatus = -1
+        var lastFailure: Error = HLSIngestError.playlistUnreachable(status: -1)
         let limit = BoundedFetch.segmentLimit(forDuration: duration)
         let startedAt = Date()
         var budget = Self.unreachableRetryBudget
@@ -803,13 +807,14 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                 let (data, response): (Data, URLResponse)
                 do {
                     (data, response) = try await budgeted(url, label: "ingest-segment") {
-                        try await BoundedFetch.data(for: self.makeRequest(url), session: self.session, limit: limit)
+                        try await BoundedFetch.data(for: self.makeRequest(url), session: self.session, limit: limit, role: "HLSSegment")
                     }
                 } catch is BoundedFetch.Exceeded {
                     // Audit NET-112: an endless body is the origin's answer, not a blip to retry.
                     throw HLSIngestError.playlistInvalid(reason: "segment exceeds \(limit) bytes")
                 }
-                lastStatus = (response as? HTTPURLResponse)?.statusCode ?? -1
+                let lastStatus = (response as? HTTPURLResponse)?.statusCode ?? -1
+                lastFailure = HLSIngestError.playlistUnreachable(status: lastStatus)
                 status = lastStatus
                 if (200..<300).contains(lastStatus) { return data }
                 if lastStatus == 404 { return Data() } // slid out of provider window; tracker advances regardless
@@ -819,14 +824,17 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                 retryAfter = (response as? HTTPURLResponse)?
                     .value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
             } catch let error as HLSIngestError { throw error }
-            catch { /* transport blip: retry */ }
+            catch {
+                if Task.isCancelled || (error as? URLError)?.code == .cancelled { throw error }
+                lastFailure = error
+            }
             attempt += 1
             // Two quick retries for a blip, as before; then the steady pace of a refused refresh,
             // within the same budget the refresh would get for this failure.
             let delay = attempt <= 2 ? 0.5 * Double(attempt) : Self.retryWait(retryAfter: retryAfter)
             budget = max(budget, Self.retryBudget(forStatus: status))
             guard Date().addingTimeInterval(delay) < startedAt.addingTimeInterval(budget) else {
-                throw HLSIngestError.playlistUnreachable(status: lastStatus)
+                throw lastFailure
             }
             try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
@@ -854,14 +862,14 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
         do {
             (data, response) = try await budgeted(url, label: "ingest-key") {
                 try await BoundedFetch.data(
-                    for: self.makeRequest(url), session: self.session, limit: BoundedFetch.keyLimit)
+                    for: self.makeRequest(url), session: self.session, limit: BoundedFetch.keyLimit, role: "HLSKey")
             }
         } catch is BoundedFetch.Exceeded {
             throw HLSIngestError.segmentDecryptFailed(reason: "key exceeds \(BoundedFetch.keyLimit) bytes")
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard (200..<300).contains(status) else {
-            throw HLSIngestError.segmentDecryptFailed(reason: "key fetch HTTP \(status)")
+            throw HLSIngestError.playlistUnreachable(status: status)
         }
         guard data.count == kCCKeySizeAES128 else {
             throw HLSIngestError.segmentDecryptFailed(reason: "key length \(data.count) != 16")

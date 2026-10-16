@@ -1,12 +1,17 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-16. Integration base: upstream 7.38.1
+Updated: 2026-10-17. Integration base: upstream 7.38.1
 (`ce1670f8c6c4b8b11a8020e9c40a10c0d6da9823`). The source-failure diagnostics
 from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
 
 ## Current differences
 
 - HTTP scheme dispatch is case insensitive.
+- HLS ingest preserves terminal transport errors, segment retry failures and key HTTP
+  refusals. Unsupported HLS formats and invalid/decryption failures have separate
+  machine-readable kinds and stable error codes.
+- Bounded body fetches expose response, redirect, timing and terminal events, including
+  body-limit termination. Intentional refusal cancellation is not a transport error.
 - Failed initial live probes preserve their original transport, HTTP or demux
   failure through publication and throwing. Runtime source-loss behavior is unchanged.
 - Initial empty persistent/streaming responses retain URL error codes before waking

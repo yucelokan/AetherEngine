@@ -4607,20 +4607,12 @@ public final class AetherEngine: ObservableObject {
             // reader's is (`publishLoadFailure`), not a stream the probe could not read: a host that
             // takes a custom probe failure to mean the format moves the channel to another route for
             // good, over a 509 an IPTV panel gives while another device holds the account's last slot.
-            if let ingest = reader as? HLSLiveIngestReader,
-               case .playlistUnreachable(let status)? = ingest.terminalError {
-                if status > 0 {
-                    let kind: PlaybackErrorKind = AVIOReader.isRateLimitStatus(status) ? .sourceRateLimited : .sourceRefused
-                    publishError(PlaybackErrorInfo(kind: kind,
-                                                   message: "Failed to load: the live playlist answered HTTP \(status)",
-                                                   underlyingCode: status))
-                } else {
-                    publishError(.liveSourceUnavailable, "Failed to load: the live playlist could not be reached")
-                }
-                throw DemuxerError.openFailed(code: -1)
+            if let ingest = reader as? HLSLiveIngestReader, let failure = ingest.terminalFailure {
+                publishLoadFailure(failure)
+                throw failure
             }
             publishError(.customSourceProbeFailed, "Failed to load: custom source probe failed", underlying: probeFailure)
-            throw DemuxerError.openFailed(code: -1)
+            throw probeFailure ?? DemuxerError.openFailed(code: -1)
         }
 
         // The reader already spent the configured initial and recovery budgets. Reopening

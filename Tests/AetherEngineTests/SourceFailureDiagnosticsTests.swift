@@ -4,6 +4,32 @@ import Testing
 
 @Suite("Source failure diagnostics", .serialized)
 struct SourceFailureDiagnosticsTests {
+    @Test("Bounded HLS requests report real HTTP refusals without synthetic cancellation")
+    func boundedResponseEvidence() async throws {
+        final class Events: @unchecked Sendable {
+            let lock = NSLock()
+            var values: [SourceNetworkDiagnostics.Event] = []
+            func add(_ value: SourceNetworkDiagnostics.Event) { lock.withLock { values.append(value) } }
+            func snapshot() -> [SourceNetworkDiagnostics.Event] { lock.withLock { values } }
+        }
+        let events = Events()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { events.add($0) }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        let server = try #require(ScriptedOriginServer { _ in .init(status: 403, declaredLength: 0) })
+        defer { server.stop() }
+        let session = URLSession(configuration: .ephemeral, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let url = URL(string: "http://127.0.0.1:\(server.port)/private.m3u8")!
+        let (_, response) = try await BoundedPlaylistFetch.data(for: URLRequest(url: url), session: session, limit: 1024)
+        #expect((response as? HTTPURLResponse)?.statusCode == 403)
+        let terminal = try #require(events.snapshot().first {
+            $0.originalURL == url && $0.phase == "completed" && $0.role == "HLSPlaylist"
+        })
+        #expect(terminal.status == 403)
+        #expect(terminal.urlErrorCode == nil)
+    }
+
     @Test("Real source response events retain status and origin")
     func responseEvidence() throws {
         final class Events: @unchecked Sendable {

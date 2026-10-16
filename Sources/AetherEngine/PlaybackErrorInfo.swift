@@ -37,6 +37,10 @@ public struct PlaybackErrorKind: RawRepresentable, Sendable, Equatable, Hashable
     /// A custom `IOReader`'s initial probe failed. The host built that reader, so only the host can
     /// re-point it.
     public static let customSourceProbeFailed = PlaybackErrorKind(rawValue: "customSourceProbeFailed")
+    /// The HLS ingest cannot handle the source's segment/encryption layout.
+    public static let hlsFormatUnsupported = PlaybackErrorKind(rawValue: "hlsFormatUnsupported")
+    /// An HLS ingest validation/decryption/stall failure; the stable underlying code identifies it.
+    public static let hlsIngestFailed = PlaybackErrorKind(rawValue: "hlsIngestFailed")
     /// A live probe that burned its full reconnect budget without opening.
     public static let liveSourceUnavailable = PlaybackErrorKind(rawValue: "liveSourceUnavailable")
     /// An HLS playlist handed to the raw live path by a custom reader, which the engine cannot re-point
@@ -168,6 +172,17 @@ extension AetherEngine {
     /// historical `sourceOpenFailed` with whatever was underneath.
     @MainActor
     func publishLoadFailure(_ error: Error) {
+        if let ingest = error as? HLSIngestError {
+            switch ingest {
+            case .playlistUnreachable(let status) where status > 0:
+                publishLoadFailure(AVIOReaderError.httpStatus(status))
+            case .encryptedNotSupported, .unsupportedSegmentFormat, .demuxedAudioNotSupported:
+                publishError(.hlsFormatUnsupported, "HLS format unsupported", underlying: ingest)
+            default:
+                publishError(.hlsIngestFailed, "HLS ingest failed", underlying: ingest)
+            }
+            return
+        }
         // AE#495: trust first. A refused handshake is not a verdict on the resource, it is the absence
         // of a connection, and it can arrive either typed by the reader or as a URL error nested under
         // whatever gave up on top of it.

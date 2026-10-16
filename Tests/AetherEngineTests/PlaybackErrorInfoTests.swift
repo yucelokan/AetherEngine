@@ -86,11 +86,14 @@ struct PlaybackErrorInfoTests {
         defer { token.cancel() }
         var options = LoadOptions()
         options.isLive = true
+        let reader = HLSLiveIngestReader(playlistURL: url)
         do {
             _ = try await engine.load(
-                source: .custom(HLSLiveIngestReader(playlistURL: url), formatHint: "mpegts"), options: options)
+                source: .custom(reader, formatHint: "mpegts"), options: options)
             Issue.record("A refused live playlist must fail the load")
-        } catch {}
+        } catch {
+            #expect(reader.terminalError != nil, "Existing hosts must still observe a terminal reader")
+        }
         return observed
     }
 

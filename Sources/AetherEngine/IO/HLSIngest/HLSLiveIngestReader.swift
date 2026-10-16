@@ -87,7 +87,8 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     private var sniffedFirstSegment = false
 
     public var terminalError: HLSIngestError? {
-        terminalFailure as? HLSIngestError
+        // Keep the public terminal-state contract; the engine consumes the original cause below.
+        terminalFailure.map { ($0 as? HLSIngestError) ?? .playlistUnreachable(status: -1) }
     }
 
     var terminalFailure: Error? {

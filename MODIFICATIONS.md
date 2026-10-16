@@ -1,7 +1,8 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-16. Integration base: fork `2d2eaeb69e969e1ccd07acc5a02d37095cfcf6ca`,
-upstream 7.36.0 plus #748 (`74c81b3c5a0047e1b0229805c20562910367b0e5`).
+Updated: 2026-10-16. Integration base: upstream 7.38.1
+(`ce1670f8c6c4b8b11a8020e9c40a10c0d6da9823`). The source-failure diagnostics
+from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
 
 ## Current differences
 
@@ -57,8 +58,8 @@ The earlier dated records, individual changes and validation limits remain in Gi
 [record before upstream integration](https://github.com/yucelokan/AetherEngine/blob/1d0450c116b6add7939e511f8630065b15dcebf7/MODIFICATIONS.md).
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
-published upstream releases; the current merge also incorporates the post-7.36.0 #748
-merge explicitly, rather than claiming it belongs to the published tag.
+published upstream releases; #748 was incorporated before the 7.37.0 release
+and is included in the current 7.38.1 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

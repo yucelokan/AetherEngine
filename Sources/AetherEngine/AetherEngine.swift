@@ -4641,8 +4641,11 @@ public final class AetherEngine: ObservableObject {
         // Live fail-fast: a failed probe means the AVIOReader burned its full reconnect budget.
         // Proceeding would dispatch on codec NONE and grind another ~30 s before erroring.
         if options.isLive, !probeOpened {
-            publishError(.liveSourceUnavailable, "Live source unavailable")
-            throw DemuxerError.openFailed(code: -5)
+            // A failed initial probe is not a runtime outage. Keep the transport,
+            // HTTP or demux cause so hosts can choose recovery without guessing.
+            let failure = probeFailure ?? DemuxerError.openFailed(code: -5)
+            publishLoadFailure(failure)
+            throw failure
         }
 
         // Forward-only custom sources cannot rewind; audio-switch and background-reload stay no-op for them.

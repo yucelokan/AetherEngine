@@ -653,7 +653,7 @@ public final class Demuxer: @unchecked Sendable {
         self.openProfile = profile
         beginOpenTiming()
         self.auditSource = isLive ? nil : (url, extraHeaders)
-        let isHTTP = url.scheme == "http" || url.scheme == "https"
+        let isHTTP = ["http", "https"].contains(url.scheme?.lowercased() ?? "")
 
         if isHTTP {
             try openHTTP(url: url, extraHeaders: extraHeaders, isLive: isLive, selectTitleID: selectTitleID)
@@ -2836,10 +2836,18 @@ public final class Demuxer: @unchecked Sendable {
     }
 }
 
-enum DemuxerError: Error, CustomStringConvertible, LocalizedError {
+enum DemuxerError: Error, CustomNSError, CustomStringConvertible, LocalizedError {
     case openFailed(code: Int32)
     case streamInfoFailed(code: Int32)
     case readFailed(code: Int32)
+
+    static var errorDomain: String { "AetherEngine.DemuxerError" }
+    var errorUserInfo: [String: Any] { [NSLocalizedDescriptionKey: description] }
+    var errorCode: Int {
+        switch self {
+        case .openFailed(let code), .streamInfoFailed(let code), .readFailed(let code): Int(code)
+        }
+    }
 
     /// AE#283: this is the most common error at the load boundary, and the AVERROR code is the whole
     /// diagnosis (INVALIDDATA vs a POSIX errno vs EOF). Rendering it keeps a refused transcode

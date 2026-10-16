@@ -1,16 +1,24 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-13. The integration base is upstream AetherEngine 7.36.0
-(`c6365cc3c8850bdb670654ca26dcd21f73670875`), followed by the upstream merge of
-PR #748 (`74c81b3c5a0047e1b0229805c20562910367b0e5`).
+Updated: 2026-10-16. Integration base: fork `2d2eaeb69e969e1ccd07acc5a02d37095cfcf6ca`,
+upstream 7.36.0 plus #748 (`74c81b3c5a0047e1b0229805c20562910367b0e5`).
 
 ## Current differences
 
-The runtime sources, tests, package/dependency declarations, examples and upstream
-documentation match that upstream main commit. All fourteen contribution PRs
-(#708–#717 and #745–#748), including maintainer integration changes and follow-ups,
-are incorporated. The fork adds only this provenance record and `COPYING.GPL3`.
-No application identity, retry budget, resource policy or UI code is added to the engine.
+- HTTP scheme dispatch is case insensitive.
+- Failed initial live probes preserve their original transport, HTTP or demux
+  failure through publication and throwing. Runtime source-loss behavior is unchanged.
+- Initial empty persistent/streaming responses retain URL error codes before waking
+  the opening thread; a live HTTP refusal remains a typed HTTP status.
+- Optional `SourceNetworkDiagnostics.handler` observes real reader response,
+  redirect, completion and transaction metrics. It never changes request policy.
+  Events include URLs for host-side correlation: hosts must redact them before
+  persistence. No headers, payloads, or error descriptions are exposed by this API.
+- Regression tests cover mixed-case transport, HTTP refusal classes, connection
+  refusal, nested URL errors and real request evidence.
+
+No app identity, provider credentials, routing policy or UI behavior is embedded.
+The earlier fourteen contributions remain incorporated in the integration base.
 
 ## Incorporated contribution and integration work
 

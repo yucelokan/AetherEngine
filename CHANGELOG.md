@@ -10,8 +10,33 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Source-open recovery.** Retiring an unsuccessful ranged connection also retires
+  its transport error, so a successful forward-only replacement can open. Refusals
+  from the replacement are still reported.
+- **Diagnostic test isolation.** Source-request assertions ignore unrelated requests
+  during parallel runs, and blocking reader opens run on owned test threads. Retry
+  fixtures that override a shared budget run serially so sibling cases retain theirs.
+  Sequential-read coverage distinguishes a failure before any body arrives from
+  a gated mid-read loss, which must still report EIO rather than EOF.
+- **Diagnostic context ownership.** Option corrections cannot retag an existing
+  load's request context; a changed context is refused before session teardown.
+- **HLS error compatibility.** Explicit `HLSIngestError` NSError codes preserve the
+  historical Swift bridge values while carrying finite diagnostic subreasons.
+  Document the separate HLS format/ingest kinds and original transport failures.
+- **Demux error compatibility.** Preserve historical NSError case codes and carry
+  the original negative FFmpeg result separately in `userInfo` and the optional
+  `PlaybackErrorInfo.ffmpegErrorCode`, including through NSError wrappers.
+
 ### Added
 
+- **Original source failures.** Initial live probes preserve transport and FFmpeg
+  causes; HLS ingest distinguishes unsupported layouts from malformed/decryption
+  failures. HTTP scheme dispatch accepts case-insensitive schemes.
+- **Source-request events.** An optional process-wide observer receives response,
+  redirect, completion and timing evidence; consuming applications own URL redaction
+  and logging policy.
 - **Typed HLS diagnostic subreasons.** `HLSIngestError.diagnosticReason` and
   `PlaybackErrorInfo.hlsDiagnosticReason` distinguish malformed playlist, response,
   encryption and segment failures with finite `HLSIngestDiagnosticReason` values.

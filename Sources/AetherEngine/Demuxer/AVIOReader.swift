@@ -1184,11 +1184,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// Only static controlled probes use this; playback retains its existing transport policy.
     private let probeControl: ProbeControl?
     private let probeRequestSession: URLSession?
+    private let persistentRequestSession: URLSession?
     private let probeDrainLock = NSLock()
     private var drainingProbeRequest = false
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, persistentRequestSession: URLSession? = nil) {
         self.sourceOpenPolicy = sourceOpenPolicy
+        self.persistentRequestSession = persistentRequestSession
         self.probeControl = probeControl
         self.probeRequestSession = probeControl == nil ? nil : probeRequestSession
         self.url = url
@@ -1749,6 +1751,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         activeTransfer = nil
         window.removeAll()
         connEnded = true
+        // The replacement owns its failures; do not carry this retired connection's error.
+        connURLFailureCode = nil
         winCond.broadcast()
         return (false, transfer, status, ignoredLength)
     }
@@ -1770,6 +1774,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         activeTransfer = nil
         window.removeAll()
         connEnded = true
+        connURLFailureCode = nil
         winCond.broadcast()
         return (contentLength, transfer)
     }
@@ -3511,7 +3516,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
                 ticket: ticket,
                 originURL: requestURLForBudget
             )
-            let task = Self.persistentSession.dataTask(with: request)
+            let task = (persistentRequestSession ?? Self.persistentSession).dataTask(with: request)
             task.delegate = delegate
             transfer = task
         }

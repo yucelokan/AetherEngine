@@ -11,6 +11,81 @@ struct SourceFailureDiagnosticsTests {
         func snapshot() -> [SourceNetworkDiagnostics.Event] { lock.withLock { values } }
     }
 
+    /// Feed the real task delegate a response before failing the transport. URLProtocol buffers
+    /// its response until completion, so its ordinary client API cannot model a mid-body failure.
+    private final class FailedPartialResponse: URLProtocol, @unchecked Sendable {
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            guard let task = task as? URLSessionDataTask,
+                  let delegate = task.delegate as? URLSessionDataDelegate else {
+                client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+                return
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Range": "bytes 0-4095/*", "Content-Length": "4096"])!
+            delegate.urlSession?(.shared, dataTask: task, didReceive: response) { _ in
+                self.client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+            }
+        }
+        override func stopLoading() {}
+    }
+
+    @Test("An abandoned ranged failure does not override a streaming replacement",
+          .timeLimit(.minutes(1)), arguments: [200, 403])
+    func retiredConnectionDoesNotFailStreamingReplacement(status: Int) async throws {
+        let body = Data(repeating: 0x47, count: 8192)
+        let server = try #require(ScriptedOriginServer { request in
+            if request.range != nil || request.method == "HEAD" {
+                return .init(status: 200, declaredLength: nil, close: true)
+            }
+            return .init(status: status, declaredLength: nil, close: true,
+                         body: status == 200 ? body : nil)
+        })
+        defer { server.stop() }
+        let url = URL(string: "http://127.0.0.1:\(server.port)/\(UUID().uuidString).bin")!
+        let events = CorrelationEvents()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { event in
+            guard event.originalURL == url else { return }
+            events.add(event)
+        }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FailedPartialResponse.self]
+        let session = URLSession(configuration: configuration, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let reader = AVIOReader(url: url, boundedInitialFetch: 4096, persistentRequestSession: session)
+        let result = try await withTaskCancellationHandler {
+            try await ProbeTestJob {
+                defer { reader.markClosed(); reader.close() }
+                try reader.open()
+                var prefix = Data(count: 16)
+                let count = prefix.withUnsafeMutableBytes {
+                    reader.read(into: $0.baseAddress!.assumingMemoryBound(to: UInt8.self), size: 16)
+                }
+                return (reader.isSeekable, count > 0 ? Data(prefix.prefix(Int(count))) : Data())
+            }.outcome()
+        } onCancel: {
+            reader.markClosed()
+            server.stop()
+        }
+        if status == 200 {
+            let (seekable, prefix) = try result.get()
+            #expect(!seekable)
+            #expect(prefix == body.prefix(16))
+        } else {
+            #expect(throws: AVIOReaderError.httpStatus(status)) { try result.get() }
+        }
+        #expect(events.snapshot().contains {
+            $0.role == "PersistentRead" && $0.phase == "completed" && $0.urlErrorCode == NSURLErrorNetworkConnectionLost
+        })
+        #expect(events.snapshot().contains {
+            $0.role == "PersistentRead" && $0.phase == "response" && $0.status == 206
+        })
+        #expect(server.requests.contains { $0.method == "GET" && $0.range == nil })
+    }
+
     @Test("A delayed old HLS request keeps its attempt after a retry and a different playback", .timeLimit(.minutes(1)))
     func delayedHLSRequestKeepsOriginalAttempt() async throws {
         let events = CorrelationEvents()
@@ -30,9 +105,11 @@ struct SourceFailureDiagnosticsTests {
         let old = SourceNetworkDiagnostics.Context(playbackID: playbackID, attemptID: UUID())
         let retry = SourceNetworkDiagnostics.Context(playbackID: playbackID, attemptID: UUID())
         let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
-        let oldURL = URL(string: "http://127.0.0.1:\(server.port)/old.m3u8")!
-        let retryURL = URL(string: "http://127.0.0.1:\(server.port)/retry.m3u8")!
-        let replacementURL = URL(string: "http://127.0.0.1:\(server.port)/replacement.m3u8")!
+        let baseURL = URL(string: "http://127.0.0.1:\(server.port)/\(UUID().uuidString)/")!
+        let oldURL = baseURL.appendingPathComponent("old.m3u8")
+        let retryURL = baseURL.appendingPathComponent("retry.m3u8")
+        let replacementURL = baseURL.appendingPathComponent("replacement.m3u8")
+        let fixtureURLs = [oldURL, retryURL, replacementURL]
         var originalRequest = URLRequest(url: oldURL)
         originalRequest.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         let oldRequest = SourceNetworkDiagnostics.request(originalRequest, context: old)
@@ -56,7 +133,14 @@ struct SourceFailureDiagnosticsTests {
         let (_, oldResponse) = try await oldFetch.value
         #expect((oldResponse as? HTTPURLResponse)?.statusCode == 200)
 
-        let completed = events.snapshot().filter { $0.phase == "completed" && $0.role == "HLSPlaylist" }
+        // Other suites can emit the same phase and role through the process-wide handler.
+        let unrelatedURL = baseURL.appendingPathComponent("unrelated.m3u8")
+        SourceNetworkDiagnostics.Trace(role: "HLSPlaylist", context: replacement)
+            .record("completed", originalURL: unrelatedURL, url: unrelatedURL, status: 200)
+        let completed = events.snapshot().filter {
+            $0.phase == "completed" && $0.role == "HLSPlaylist"
+                && $0.originalURL.map { fixtureURLs.contains($0) } == true
+        }
         #expect(completed.map(\.originalURL) == [retryURL, replacementURL, oldURL])
         #expect(Set(completed.map(\.requestID)).count == 3)
         for (url, expected) in [(oldURL, old), (retryURL, retry), (replacementURL, replacement)] {
@@ -108,7 +192,7 @@ struct SourceFailureDiagnosticsTests {
         defer { SourceNetworkDiagnostics.handler = previous }
         let original = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
         let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
-        let url = URL(string: "https://origin.example/segment.ts")!
+        let url = URL(string: "https://origin.example/\(UUID().uuidString)/segment.ts")!
         let trace = SourceNetworkDiagnostics.$context.withValue(original) {
             SourceNetworkDiagnostics.Trace(role: "HLSSegment")
         }
@@ -123,7 +207,10 @@ struct SourceFailureDiagnosticsTests {
                 context: SourceNetworkDiagnostics.context(for: unbound))
             unboundTrace.record("completed", originalURL: url, url: url, status: 200)
         }
-        let captured = events.snapshot()
+        let unrelatedURL = url.deletingLastPathComponent().appendingPathComponent("unrelated.ts")
+        SourceNetworkDiagnostics.Trace(role: "HLSSegment", context: original)
+            .record("completed", originalURL: unrelatedURL, url: unrelatedURL, status: 200)
+        let captured = events.snapshot().filter { $0.originalURL == url }
         #expect(captured.count == 3)
         #expect(captured[0].context == original && captured[1].context == original)
         #expect(captured[0].requestID == captured[1].requestID)
@@ -190,26 +277,28 @@ struct SourceFailureDiagnosticsTests {
         #expect(terminal.urlErrorCode == nil)
     }
 
-    @Test("Real source response events retain status and origin")
-    func responseEvidence() throws {
-        final class Events: @unchecked Sendable {
-            let lock = NSLock()
-            var values: [SourceNetworkDiagnostics.Event] = []
-            func add(_ value: SourceNetworkDiagnostics.Event) { lock.lock(); values.append(value); lock.unlock() }
-        }
-        let events = Events()
+    @Test("Real source response events retain status and origin", .timeLimit(.minutes(1)))
+    func responseEvidence() async throws {
+        let events = CorrelationEvents()
         let previous = SourceNetworkDiagnostics.handler
         SourceNetworkDiagnostics.handler = { events.add($0) }
         defer { SourceNetworkDiagnostics.handler = previous }
         let server = try #require(ScriptedOriginServer { _ in .init(status: 403, declaredLength: 0) })
         defer { server.stop() }
-        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/live/test.ts")!, isLive: true)
-        defer { reader.markClosed(); reader.close() }
-        #expect(throws: AVIOReaderError.httpStatus(403)) { try reader.open() }
-        events.lock.lock()
-        let values = events.values
-        events.lock.unlock()
-        let response = try #require(values.first { $0.phase == "response" && $0.status == 403 && $0.originalURL?.port == Int(server.port) && $0.role == "PersistentRead" })
+        let url = URL(string: "http://127.0.0.1:\(server.port)/\(UUID().uuidString)/test.ts")!
+        let reader = AVIOReader(url: url, isLive: true)
+        try await withTaskCancellationHandler {
+            let result = try await ProbeTestJob {
+                defer { reader.markClosed(); reader.close() }
+                try reader.open()
+            }.outcome()
+            #expect(throws: AVIOReaderError.httpStatus(403)) { try result.get() }
+        } onCancel: {
+            reader.markClosed()
+        }
+        let response = try #require(events.snapshot().first {
+            $0.phase == "response" && $0.status == 403 && $0.originalURL == url && $0.role == "PersistentRead"
+        })
         #expect(response.originalURL?.port == Int(server.port))
         #expect(response.url?.host == "127.0.0.1")
         #expect(response.urlErrorCode == nil)
@@ -247,12 +336,19 @@ struct SourceFailureDiagnosticsTests {
         #expect(SourceNetworkDiagnostics.urlErrorCode(NSError(domain: "private.example", code: -1003)) == nil)
     }
 
-    @Test("NSError carries the actual FFmpeg failure rather than its Swift enum ordinal")
+    @Test("NSError keeps historical case codes and carries the original FFmpeg failure separately")
     func demuxCodeSurvivesBridge() {
         for code: Int32 in [-1094995529, -1128613112, -1296385272, -5] {
-            let error = DemuxerError.openFailed(code: code) as NSError
-            #expect(error.domain == "AetherEngine.DemuxerError")
-            #expect(error.code == Int(code))
+            let cases: [(DemuxerError, Int)] = [
+                (.openFailed(code: code), 0), (.streamInfoFailed(code: code), 1), (.readFailed(code: code), 2)
+            ]
+            for (failure, historicalCode) in cases {
+                let error = failure as NSError
+                #expect(error.domain == "AetherEngine.DemuxerError")
+                #expect(error.code == historicalCode)
+                #expect(error.userInfo[DemuxerError.ffmpegErrorCodeKey] as? Int == Int(code))
+                #expect(error.localizedDescription == failure.description)
+            }
         }
     }
 

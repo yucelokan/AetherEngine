@@ -2867,11 +2867,33 @@ enum DemuxerError: Error, CustomNSError, CustomStringConvertible, LocalizedError
     case readFailed(code: Int32)
 
     static var errorDomain: String { "AetherEngine.DemuxerError" }
-    var errorUserInfo: [String: Any] { [NSLocalizedDescriptionKey: description] }
+    static let ffmpegErrorCodeKey = "AetherFFmpegErrorCode"
+    var errorUserInfo: [String: Any] {
+        let code: Int32
+        switch self {
+        case .openFailed(let value), .streamInfoFailed(let value), .readFailed(let value): code = value
+        }
+        return [NSLocalizedDescriptionKey: description, Self.ffmpegErrorCodeKey: Int(code)]
+    }
+    // Preserve Swift's implicit NSError codes from before CustomNSError conformance.
     var errorCode: Int {
         switch self {
-        case .openFailed(let code), .streamInfoFailed(let code), .readFailed(let code): Int(code)
+        case .openFailed: 0
+        case .streamInfoFailed: 1
+        case .readFailed: 2
         }
+    }
+
+    static func preservedFFmpegCode(in error: Error?) -> Int? {
+        var next = error as NSError?
+        for _ in 0..<6 {
+            guard let current = next else { break }
+            if current.domain == errorDomain,
+               let code = current.userInfo[ffmpegErrorCodeKey] as? Int,
+               code < 0, Int32(exactly: code) != nil { return code }
+            next = current.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return nil
     }
 
     /// AE#283: this is the most common error at the load boundary, and the AVERROR code is the whole

@@ -117,6 +117,8 @@ public struct PlaybackErrorInfo: Sendable, Equatable {
     public let underlyingCode: Int?
     /// Finite HLS subreason; unlike the human-readable message, safe for support telemetry.
     public let hlsDiagnosticReason: HLSIngestDiagnosticReason?
+    /// Original negative FFmpeg error, separate from the stable NSError case code.
+    public let ffmpegErrorCode: Int?
     /// The same text `state` carries.
     public let message: String
 
@@ -124,12 +126,14 @@ public struct PlaybackErrorInfo: Sendable, Equatable {
                 message: String,
                 underlyingDomain: String? = nil,
                 underlyingCode: Int? = nil,
-                hlsDiagnosticReason: HLSIngestDiagnosticReason? = nil) {
+                hlsDiagnosticReason: HLSIngestDiagnosticReason? = nil,
+                ffmpegErrorCode: Int? = nil) {
         self.kind = kind
         self.message = message
         self.underlyingDomain = underlyingDomain
         self.underlyingCode = underlyingCode
         self.hlsDiagnosticReason = hlsDiagnosticReason
+        self.ffmpegErrorCode = ffmpegErrorCode
     }
 
     /// Captures domain and code off a Foundation / AVFoundation error, which is the half of the
@@ -140,7 +144,8 @@ public struct PlaybackErrorInfo: Sendable, Equatable {
                   message: message,
                   underlyingDomain: nsError?.domain,
                   underlyingCode: nsError?.code,
-                  hlsDiagnosticReason: .preserved(in: underlying))
+                  hlsDiagnosticReason: .preserved(in: underlying),
+                  ffmpegErrorCode: DemuxerError.preservedFFmpegCode(in: underlying))
     }
 }
 

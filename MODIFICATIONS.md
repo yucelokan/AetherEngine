@@ -19,6 +19,13 @@ from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
   failure through publication and throwing. Runtime source-loss behavior is unchanged.
 - Initial empty persistent/streaming responses retain URL error codes before waking
   the opening thread; a live HTTP refusal remains a typed HTTP status.
+- Retiring a ranged connection clears its transport failure before a streaming
+  replacement is judged; the replacement still reports its own failures.
+- Demux NSError codes retain the historical open/stream-information/read case
+  values. The original negative FFmpeg result is separate metadata, also exposed
+  as optional `PlaybackErrorInfo.ffmpegErrorCode`; error messages are unchanged.
+- Source diagnostic context is load identity: option corrections refuse a changed
+  context before teardown and keep the original context during tuning rebuilds.
 - Optional `SourceNetworkDiagnostics.handler` observes real reader response,
   redirect, completion and transaction metrics. It never changes request policy.
   Events include URLs for host-side correlation: hosts must redact them before
@@ -34,7 +41,9 @@ from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
   segment probes emit the same source-network event contract.
 - Regression tests cover mixed-case transport, HTTP refusal classes, connection
   refusal, nested URL errors, finite HLS causes, delayed request ownership,
-  unattributed requests, header preservation and real request evidence.
+  unattributed requests, header preservation and real request evidence. The exact
+  historical HLS NSError codes are pinned for all cases, and diagnostic assertions
+  filter by fixture identity so concurrent requests cannot change their results.
 
 No app identity, provider credentials, routing policy or UI behavior is embedded.
 The earlier fourteen contributions remain incorporated in the integration base.
@@ -77,7 +86,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.38.1 integration.
+and is included in the current 7.39.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

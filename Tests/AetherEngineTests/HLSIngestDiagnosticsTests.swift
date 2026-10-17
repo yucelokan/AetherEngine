@@ -3,6 +3,31 @@ import XCTest
 @testable import AetherEngine
 
 final class HLSIngestDiagnosticsTests: XCTestCase {
+    func testAllCasesPreserveHistoricalNSErrorCodesAndPlaybackErrorInfo() {
+        // Codes produced by Swift's implicit bridging at upstream 834f5fd4, before CustomNSError.
+        let cases: [(HLSIngestError, Int, HLSIngestDiagnosticReason)] = [
+            (.playlistUnreachable(status: 403), 0, .httpResponseRefused),
+            (.playlistInvalid(reason: "no segments"), 1, .noSegments),
+            (.segmentDecryptFailed(reason: "AES-128-CBC failed"), 2, .decryptionFailed),
+            (.encryptedNotSupported, 3, .encryptionUnsupported),
+            (.unsupportedSegmentFormat, 4, .segmentFormatUnsupported),
+            (.ingestStalled, 5, .ingestStalled),
+            (.demuxedAudioNotSupported, 6, .demuxedAudioUnsupported)
+        ]
+        for (error, code, reason) in cases {
+            let bridged = error as NSError
+            XCTAssertEqual(bridged.domain, "AetherEngine.HLSIngestError")
+            XCTAssertEqual(bridged.code, code, "Historical code changed for \(error)")
+            XCTAssertEqual(bridged.localizedDescription, error.description)
+            XCTAssertEqual(bridged.userInfo[HLSIngestDiagnosticReason.userInfoKey] as? String, reason.rawValue)
+
+            let info = PlaybackErrorInfo(kind: .hlsIngestFailed, message: "HLS ingest failed", underlying: bridged)
+            XCTAssertEqual(info.underlyingDomain, "AetherEngine.HLSIngestError")
+            XCTAssertEqual(info.underlyingCode, code)
+            XCTAssertEqual(info.hlsDiagnosticReason, reason)
+        }
+    }
+
     func testPlaylistSubreasonsSurviveNSErrorWithoutChangingTheExistingCode() {
         let cases: [(String, HLSIngestDiagnosticReason)] = [
             ("missing #EXTM3U", .missingEXTM3U),
@@ -30,7 +55,7 @@ final class HLSIngestDiagnosticsTests: XCTestCase {
         for (text, reason) in cases {
             let error = HLSIngestError.playlistInvalid(reason: text)
             let bridged = error as NSError
-            XCTAssertEqual(bridged.code, 2)
+            XCTAssertEqual(bridged.code, 1)
             XCTAssertEqual(bridged.domain, HLSIngestError.errorDomain)
             XCTAssertEqual(error.diagnosticReason, reason)
             XCTAssertEqual(bridged.userInfo[HLSIngestDiagnosticReason.userInfoKey] as? String, reason.rawValue)
@@ -61,17 +86,17 @@ final class HLSIngestDiagnosticsTests: XCTestCase {
 
     func testResponseEncryptionAndSegmentReasonsAreFinite() {
         let cases: [(HLSIngestError, HLSIngestDiagnosticReason, Int)] = [
-            (.playlistUnreachable(status: -1), .invalidResponse, 1),
-            (.playlistUnreachable(status: 403), .httpResponseRefused, 1),
+            (.playlistUnreachable(status: -1), .invalidResponse, 0),
+            (.playlistUnreachable(status: 403), .httpResponseRefused, 0),
             (.encryptedNotSupported, .encryptionUnsupported, 3),
-            (.segmentDecryptFailed(reason: "unresolvable key URI"), .invalidKeyURI, 4),
-            (.segmentDecryptFailed(reason: "key length 8 != 16"), .invalidKeyLength, 4),
-            (.segmentDecryptFailed(reason: "key length is not 16 bytes"), .invalidKeyLength, 4),
-            (.segmentDecryptFailed(reason: "key exceeds 64 bytes"), .keySizeLimitExceeded, 4),
-            (.segmentDecryptFailed(reason: "https://private.invalid/token"), .decryptionFailed, 4),
-            (.unsupportedSegmentFormat, .segmentFormatUnsupported, 5),
-            (.ingestStalled, .ingestStalled, 6),
-            (.demuxedAudioNotSupported, .demuxedAudioUnsupported, 7)
+            (.segmentDecryptFailed(reason: "unresolvable key URI"), .invalidKeyURI, 2),
+            (.segmentDecryptFailed(reason: "key length 8 != 16"), .invalidKeyLength, 2),
+            (.segmentDecryptFailed(reason: "key length is not 16 bytes"), .invalidKeyLength, 2),
+            (.segmentDecryptFailed(reason: "key exceeds 64 bytes"), .keySizeLimitExceeded, 2),
+            (.segmentDecryptFailed(reason: "https://private.invalid/token"), .decryptionFailed, 2),
+            (.unsupportedSegmentFormat, .segmentFormatUnsupported, 4),
+            (.ingestStalled, .ingestStalled, 5),
+            (.demuxedAudioNotSupported, .demuxedAudioUnsupported, 6)
         ]
         for (error, reason, code) in cases {
             XCTAssertEqual(error.diagnosticReason, reason)
@@ -82,7 +107,7 @@ final class HLSIngestDiagnosticsTests: XCTestCase {
     func testUntrustedReasonMetadataIsRejectedAndTraversalIsBounded() {
         let privateMetadata = [HLSIngestDiagnosticReason.userInfoKey: "https://private.invalid/password"]
         XCTAssertNil(HLSIngestDiagnosticReason.preserved(in: NSError(
-            domain: HLSIngestError.errorDomain, code: 2, userInfo: privateMetadata)))
+            domain: HLSIngestError.errorDomain, code: 1, userInfo: privateMetadata)))
         XCTAssertNil(HLSIngestDiagnosticReason.preserved(in: NSError(
             domain: "unrelated.domain", code: 2,
             userInfo: [HLSIngestDiagnosticReason.userInfoKey: "no_segments"])))

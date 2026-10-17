@@ -46,8 +46,8 @@ struct SequentialOriginReaderTests {
         #expect(server.rangeHeaderPresence == [false])
     }
 
-    @Test("a body that ends short of its Content-Length reports EIO, not EOF")
-    func shortBodyReportsEIO() throws {
+    @Test("a body that ends short of its Content-Length reports EIO, not EOF", .timeLimit(.minutes(1)))
+    func shortBodyReportsEIO() async throws {
         let total: Int64 = 8 * 1024 * 1024
         let servedBeforeDrop: Int64 = 2 * 1024 * 1024
         let maybeServer = ThrottledOriginServer(totalSize: total, throttleUs: 0,
@@ -56,10 +56,25 @@ struct SequentialOriginReaderTests {
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/archive.ts")!,
                                 sequentialOnly: true)
-        defer { reader.markClosed(); reader.close() }
-        try reader.open()
-
-        let (read, last) = drain(reader, upTo: total)
+        let outcome = try await withTaskCancellationHandler {
+            try await ProbeTestJob<(Int64, Int32)?> {
+                defer { reader.markClosed(); reader.close() }
+                do {
+                    try reader.open()
+                } catch let error as URLError where error.code == .networkConnectionLost {
+                    // No body reached the reader: open preserves the original transport failure.
+                    return nil
+                }
+                return drain(reader, upTo: total)
+            }.outcome()
+        } onCancel: {
+            reader.markClosed()
+            server.stop()
+        }
+        let drained = try outcome.get()
+        #expect(server.requestLog.count == 1)
+        #expect(server.rangeHeaderPresence == [false])
+        guard let (read, last) = drained else { return }
         // Whatever arrived is short of the promise, and the assertions stop there. How much
         // arrives is URLSession's call: it hands over what it has buffered when the body is cut
         // off, and on a loaded runner that can be nothing at all. `>= 1 MiB` fell first

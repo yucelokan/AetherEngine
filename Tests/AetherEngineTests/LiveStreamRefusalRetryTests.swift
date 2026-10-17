@@ -11,7 +11,9 @@ import Foundation
 /// The loopback cases run with the reconnect backoff scaled down, the way the other reader suites
 /// do, and are judged by what came through and how many requests it took, never by the wall clock.
 /// The wait itself is a pure rule, tested as one.
-@Suite("Live stream reader rides out refusals", .offCooperativePool, .timeLimit(.minutes(2)))
+// Cases temporarily change the same process-wide retry budget before constructing their reader.
+// Serial execution keeps the one-second exhaustion case from shortening a sibling's recovery.
+@Suite("Live stream reader rides out refusals", .serialized, .offCooperativePool, .timeLimit(.minutes(2)))
 struct LiveStreamRefusalRetryTests {
 
     // MARK: - Loopback origin

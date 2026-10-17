@@ -46,7 +46,8 @@ public enum HLSIngestDiagnosticReason: String, Sendable, CaseIterable {
     }
 }
 
-/// Terminal errors from the live HLS ingest. Every case causes a host fallback to the Jellyfin-mediated path. Phase-1 limits (encryption, fMP4) fall back deliberately rather than half-work.
+/// Terminal errors from the HLS ingest. Hosts choose recovery or fallback from the failure kind;
+/// a malformed playlist or a transport failure does not establish a format incompatibility.
 public enum HLSIngestError: Error, Equatable, CustomStringConvertible, LocalizedError, CustomNSError {
     case playlistUnreachable(status: Int)
     case playlistInvalid(reason: String)
@@ -78,15 +79,16 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible, Localized
     public var errorDescription: String? { description }
 
     public static var errorDomain: String { "AetherEngine.HLSIngestError" }
+    // Preserve Swift's implicit NSError codes from before CustomNSError conformance.
     public var errorCode: Int {
         switch self {
-        case .playlistUnreachable: 1
-        case .playlistInvalid: 2
+        case .playlistUnreachable: 0
+        case .playlistInvalid: 1
+        case .segmentDecryptFailed: 2
         case .encryptedNotSupported: 3
-        case .segmentDecryptFailed: 4
-        case .unsupportedSegmentFormat: 5
-        case .ingestStalled: 6
-        case .demuxedAudioNotSupported: 7
+        case .unsupportedSegmentFormat: 4
+        case .ingestStalled: 5
+        case .demuxedAudioNotSupported: 6
         }
     }
     public var errorUserInfo: [String: Any] {

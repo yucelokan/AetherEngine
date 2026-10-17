@@ -4,6 +4,166 @@ import Testing
 
 @Suite("Source failure diagnostics", .serialized)
 struct SourceFailureDiagnosticsTests {
+    private final class CorrelationEvents: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [SourceNetworkDiagnostics.Event] = []
+        func add(_ value: SourceNetworkDiagnostics.Event) { lock.withLock { values.append(value) } }
+        func snapshot() -> [SourceNetworkDiagnostics.Event] { lock.withLock { values } }
+    }
+
+    @Test("A delayed old HLS request keeps its attempt after a retry and a different playback", .timeLimit(.minutes(1)))
+    func delayedHLSRequestKeepsOriginalAttempt() async throws {
+        let events = CorrelationEvents()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { events.add($0) }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        let releaseOld = DispatchSemaphore(value: 0)
+        let server = try #require(ScriptedOriginServer { request in
+            // ScriptedOriginServer runs each reply on its own detached serving thread.
+            if request.range == "bytes=0-0" { releaseOld.wait() }
+            return .init(status: 200, declaredLength: 0)
+        })
+        defer { releaseOld.signal(); server.stop() }
+        let session = URLSession(configuration: .ephemeral, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let playbackID = UUID()
+        let old = SourceNetworkDiagnostics.Context(playbackID: playbackID, attemptID: UUID())
+        let retry = SourceNetworkDiagnostics.Context(playbackID: playbackID, attemptID: UUID())
+        let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let oldURL = URL(string: "http://127.0.0.1:\(server.port)/old.m3u8")!
+        let retryURL = URL(string: "http://127.0.0.1:\(server.port)/retry.m3u8")!
+        let replacementURL = URL(string: "http://127.0.0.1:\(server.port)/replacement.m3u8")!
+        var originalRequest = URLRequest(url: oldURL)
+        originalRequest.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        let oldRequest = SourceNetworkDiagnostics.request(originalRequest, context: old)
+        let oldFetch = Task {
+            // The request was already created for the outgoing attempt. Even
+            // a newer ambient context at fetch time must not replace its owner.
+            try await SourceNetworkDiagnostics.$context.withValue(retry) {
+                try await BoundedPlaylistFetch.data(for: oldRequest, session: session, limit: 1_024)
+            }
+        }
+        defer { oldFetch.cancel() }
+        try await waitFor { server.requests.contains { $0.range == "bytes=0-0" } }
+        let retryRequest = SourceNetworkDiagnostics.request(URLRequest(url: retryURL), context: retry)
+        _ = try await SourceNetworkDiagnostics.$context.withValue(replacement) {
+            try await BoundedPlaylistFetch.data(for: retryRequest, session: session, limit: 1_024)
+        }
+        let replacementRequest = SourceNetworkDiagnostics.request(URLRequest(url: replacementURL), context: replacement)
+        _ = try await BoundedPlaylistFetch.data(for: replacementRequest, session: session, limit: 1_024)
+        #expect(!events.snapshot().contains { $0.originalURL == oldURL && $0.phase == "completed" })
+        releaseOld.signal()
+        let (_, oldResponse) = try await oldFetch.value
+        #expect((oldResponse as? HTTPURLResponse)?.statusCode == 200)
+
+        let completed = events.snapshot().filter { $0.phase == "completed" && $0.role == "HLSPlaylist" }
+        #expect(completed.map(\.originalURL) == [retryURL, replacementURL, oldURL])
+        #expect(Set(completed.map(\.requestID)).count == 3)
+        for (url, expected) in [(oldURL, old), (retryURL, retry), (replacementURL, replacement)] {
+            let requestEvents = events.snapshot().filter { $0.originalURL == url }
+            #expect(requestEvents.contains { $0.phase == "response" })
+            #expect(requestEvents.contains { $0.phase == "completed" })
+            #expect(requestEvents.allSatisfy { $0.context == expected })
+            #expect(Set(requestEvents.map(\.requestID)).count == 1)
+        }
+    }
+
+    @Test("Playlist segment and key requests preserve the reader's original context and headers")
+    func hlsRequestsKeepCapturedContextAndHeaders() throws {
+        let original = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let baseURL = URL(string: "https://origin.example/live/main.m3u8")!
+        let headers = ["Authorization": "Bearer private-fixture-token", "User-Agent": "fixture-agent"]
+        let reader = SourceNetworkDiagnostics.$context.withValue(original) {
+            HLSLiveIngestReader(playlistURL: baseURL, httpHeaders: headers)
+        }
+        defer { reader.close() }
+        try SourceNetworkDiagnostics.$context.withValue(replacement) {
+            let fresh = try #require(reader.makeFreshMainReader())
+            defer { fresh.close() }
+            for path in ["main.m3u8", "segment.ts", "encryption.key"] {
+                let url = baseURL.deletingLastPathComponent().appendingPathComponent(path)
+                for owner in [reader, fresh] {
+                    let request = owner.makeRequest(url)
+                    #expect(SourceNetworkDiagnostics.context(for: request) == original)
+                    #expect(request.url == url)
+                    #expect(request.httpMethod == "GET")
+                    #expect(request.allHTTPHeaderFields?.count == headers.count)
+                    for (name, value) in headers { #expect(request.value(forHTTPHeaderField: name) == value) }
+                    #expect(request.value(forHTTPHeaderField: "playback_id") == nil)
+                    #expect(request.value(forHTTPHeaderField: "attempt_id") == nil)
+                }
+            }
+            let crossOrigin = reader.makeRequest(URL(string: "https://cdn.example/segment.ts")!)
+            #expect(SourceNetworkDiagnostics.context(for: crossOrigin) == original)
+            #expect(crossOrigin.value(forHTTPHeaderField: "Authorization") == nil)
+        }
+    }
+
+    @Test("Trace captures once and an unbound request cannot borrow an ambient playback")
+    func tracesFreezeContextAndKeepUnboundRequestsUnattributed() throws {
+        let events = CorrelationEvents()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { events.add($0) }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        let original = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let url = URL(string: "https://origin.example/segment.ts")!
+        let trace = SourceNetworkDiagnostics.$context.withValue(original) {
+            SourceNetworkDiagnostics.Trace(role: "HLSSegment")
+        }
+        let tagged = SourceNetworkDiagnostics.request(URLRequest(url: url), context: original)
+        let unbound = SourceNetworkDiagnostics.request(tagged, context: nil)
+        #expect(SourceNetworkDiagnostics.context(for: tagged) == original)
+        #expect(SourceNetworkDiagnostics.context(for: unbound) == nil)
+        SourceNetworkDiagnostics.$context.withValue(replacement) {
+            trace.record("response", originalURL: url, url: url, status: 200)
+            trace.record("completed", originalURL: url, url: url, status: 200)
+            let unboundTrace = SourceNetworkDiagnostics.Trace(role: "HLSKey",
+                context: SourceNetworkDiagnostics.context(for: unbound))
+            unboundTrace.record("completed", originalURL: url, url: url, status: 200)
+        }
+        let captured = events.snapshot()
+        #expect(captured.count == 3)
+        #expect(captured[0].context == original && captured[1].context == original)
+        #expect(captured[0].requestID == captured[1].requestID)
+        #expect(captured[2].context == nil)
+        #expect(captured[2].requestID != captured[0].requestID)
+    }
+
+    @Test("A segment carriage probe completes once with its captured context", .timeLimit(.minutes(1)), arguments: [200, 403])
+    func carriageProbeCompletesWithCapturedContext(status: Int) async throws {
+        let events = CorrelationEvents()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { events.add($0) }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        let body = Data([0, 1, 2, 3])
+        let server = try #require(ScriptedOriginServer { _ in
+            .init(status: status, declaredLength: Int64(body.count), close: true, body: body)
+        })
+        defer { server.stop() }
+        let session = URLSession(configuration: .ephemeral, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        let original = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let url = URL(string: "http://127.0.0.1:\(server.port)/head.ts")!
+        do {
+            _ = try await SourceNetworkDiagnostics.$context.withValue(replacement) {
+                try await HLSCarriageProbe.classifySegmentHead(
+                    url: url, httpHeaders: [:], session: session, diagnosticContext: original)
+            }
+            #expect(status == 200)
+        } catch {
+            #expect(error as? HLSIngestError == .playlistUnreachable(status: status))
+            #expect(status == 403)
+        }
+        let captured = events.snapshot().filter { $0.originalURL == url }
+        #expect(captured.filter { $0.phase == "response" }.count == 1)
+        #expect(captured.filter { $0.phase == "completed" }.count == 1)
+        #expect(captured.allSatisfy { $0.context == original && $0.role == "HLSSegment" && $0.status == status })
+        #expect(Set(captured.map(\.requestID)).count == 1)
+    }
+
     @Test("Bounded HLS requests report real HTTP refusals without synthetic cancellation")
     func boundedResponseEvidence() async throws {
         final class Events: @unchecked Sendable {

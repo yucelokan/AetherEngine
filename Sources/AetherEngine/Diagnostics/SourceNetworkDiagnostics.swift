@@ -3,6 +3,37 @@ import Foundation
 /// Observes real source requests. Hosts must redact URLs before persistence;
 /// no headers, response bodies or localized error messages are included.
 public enum SourceNetworkDiagnostics {
+    /// Host-owned opaque identifiers. They are never sent as HTTP headers.
+    public struct Context: Sendable, Equatable {
+        public let playbackID: UUID
+        public let attemptID: UUID
+        public init(playbackID: UUID, attemptID: UUID) {
+            self.playbackID = playbackID
+            self.attemptID = attemptID
+        }
+    }
+
+    @TaskLocal public static var context: Context?
+    private static let requestContextKey = "AetherEngine.SourceNetworkDiagnostics.context"
+
+    static func request(_ request: URLRequest, context: Context?) -> URLRequest {
+        let copy = (request as NSURLRequest).mutableCopy() as! NSMutableURLRequest
+        if let context {
+            URLProtocol.setProperty([context.playbackID.uuidString, context.attemptID.uuidString],
+                                    forKey: requestContextKey, in: copy)
+        } else {
+            URLProtocol.removeProperty(forKey: requestContextKey, in: copy)
+        }
+        return copy as URLRequest
+    }
+
+    static func context(for request: URLRequest) -> Context? {
+        guard let values = URLProtocol.property(forKey: requestContextKey, in: request) as? [String],
+              values.count == 2, let playbackID = UUID(uuidString: values[0]),
+              let attemptID = UUID(uuidString: values[1]) else { return nil }
+        return Context(playbackID: playbackID, attemptID: attemptID)
+    }
+
     public struct Event: Sendable {
         public let requestID: UUID
         public let role: String
@@ -18,6 +49,7 @@ public enum SourceNetworkDiagnostics {
         public var tlsMilliseconds: Int?
         public var responseMilliseconds: Int?
         public var reusedConnection: Bool?
+        public var context: Context? = nil
     }
 
     public static var handler: (@Sendable (Event) -> Void)? {
@@ -41,7 +73,20 @@ public enum SourceNetworkDiagnostics {
         private let id = UUID()
         private let role: String
         private let start = ProcessInfo.processInfo.systemUptime
-        init(role: String) { self.role = role }
+        private let context: Context?
+        init(role: String, context: Context? = SourceNetworkDiagnostics.context) {
+            self.role = role
+            self.context = context
+        }
+
+        func record(_ phase: String, originalURL: URL, url: URL, status: Int? = nil,
+                    bytes: Int64 = 0, error: Error? = nil) {
+            handler?(Event(requestID: id, role: role, phase: phase,
+                           originalURL: originalURL, url: url, status: status,
+                           urlErrorCode: urlErrorCode(error), bytes: bytes,
+                           elapsedMilliseconds: Int(max(0, ProcessInfo.processInfo.systemUptime - start) * 1_000),
+                           context: context))
+        }
 
         private func event(_ phase: String, task: URLSessionTask, url: URL? = nil,
                            status: Int? = nil, error: Error? = nil) -> Event {
@@ -49,7 +94,8 @@ public enum SourceNetworkDiagnostics {
                   originalURL: task.originalRequest?.url, url: url ?? task.currentRequest?.url,
                   status: status ?? (task.response as? HTTPURLResponse)?.statusCode,
                   urlErrorCode: urlErrorCode(error), bytes: task.countOfBytesReceived,
-                  elapsedMilliseconds: Int(max(0, ProcessInfo.processInfo.systemUptime - start) * 1_000))
+                  elapsedMilliseconds: Int(max(0, ProcessInfo.processInfo.systemUptime - start) * 1_000),
+                  context: context)
         }
         func response(task: URLSessionTask, response: URLResponse) {
             handler?(event("response", task: task, url: response.url, status: (response as? HTTPURLResponse)?.statusCode))

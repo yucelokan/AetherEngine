@@ -3972,7 +3972,8 @@ public final class AetherEngine: ObservableObject {
         guard let reader = try await HLSVODIngestReader.makeIfHEVCMPEGTS(
             playlistURL: playlistURL,
             httpHeaders: options.httpHeaders,
-            persistentHTTP1: options.heldSourceConnection
+            persistentHTTP1: options.heldSourceConnection,
+            diagnosticContext: options.sourceDiagnosticsContext
         ) else { return .notTaken }
         try checkLoadCurrent(generation)
         EngineLog.emit(
@@ -4015,10 +4016,12 @@ public final class AetherEngine: ObservableObject {
         defer { if let gen = attempt.generation { waitingLoadGenerations.remove(gen) } }
         do {
             let probe = try await withTaskCancellationHandler {
-                try await loadSession(
-                    source: source, startPosition: startPosition, options: options,
-                    audioSourceStreamIndex: audioSourceStreamIndex, discTitleID: discTitleID,
-                    attempt: attempt)
+                try await SourceNetworkDiagnostics.$context.withValue(options.sourceDiagnosticsContext) {
+                    try await loadSession(
+                        source: source, startPosition: startPosition, options: options,
+                        audioSourceStreamIndex: audioSourceStreamIndex, discTitleID: discTitleID,
+                        attempt: attempt)
+                }
             } onCancel: {
                 Task { @MainActor [weak self] in self?.abandonCancelledLoad(attempt) }
             }
@@ -4147,7 +4150,8 @@ public final class AetherEngine: ObservableObject {
             )
             options.nativeRemoteHLS = false
             source = .custom(
-                HLSLiveIngestReader(playlistURL: candidate, httpHeaders: options.httpHeaders),
+                HLSLiveIngestReader(playlistURL: candidate, httpHeaders: options.httpHeaders,
+                                    diagnosticContext: options.sourceDiagnosticsContext),
                 formatHint: "mpegts"
             )
         }
@@ -4442,7 +4446,8 @@ public final class AetherEngine: ObservableObject {
             return try await load(
                 source: .custom(
                     HLSLiveIngestReader(playlistURL: livePlaylistURL,
-                                        httpHeaders: loadedOptions.httpHeaders),
+                                        httpHeaders: loadedOptions.httpHeaders,
+                                        diagnosticContext: loadedOptions.sourceDiagnosticsContext),
                     formatHint: "mpegts"
                 ),
                 startPosition: startPosition,
@@ -4647,7 +4652,8 @@ public final class AetherEngine: ObservableObject {
             return try await load(
                 source: .custom(
                     HLSLiveIngestReader(playlistURL: livePlaylistURL,
-                                        httpHeaders: loadedOptions.httpHeaders),
+                                        httpHeaders: loadedOptions.httpHeaders,
+                                        diagnosticContext: loadedOptions.sourceDiagnosticsContext),
                     formatHint: "mpegts"
                 ),
                 startPosition: startPosition,

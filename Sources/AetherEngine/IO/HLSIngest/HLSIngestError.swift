@@ -1,5 +1,51 @@
 import Foundation
 
+/// Finite diagnostics only; payload strings and playlist contents never become telemetry.
+public enum HLSIngestDiagnosticReason: String, Sendable, CaseIterable {
+    case missingEXTM3U = "missing_extm3u"
+    case missingTargetDuration = "missing_target_duration"
+    case noSegments = "no_segments"
+    case noVariants = "no_variants"
+    case noUsableVariant = "no_usable_variant"
+    case expectedMediaPlaylist = "expected_media_playlist"
+    case missingEndList = "missing_endlist"
+    case invalidSegmentURI = "invalid_segment_uri"
+    case invalidMediaSequence = "invalid_media_sequence"
+    case invalidTargetDuration = "invalid_target_duration"
+    case invalidSegmentDuration = "invalid_segment_duration"
+    case durationLimitExceeded = "duration_limit_exceeded"
+    case playlistSizeLimitExceeded = "playlist_size_limit_exceeded"
+    case playlistLineLimitExceeded = "playlist_line_limit_exceeded"
+    case bodySizeLimitExceeded = "body_size_limit_exceeded"
+    case invalidPlaylistEncoding = "invalid_playlist_encoding"
+    case invalidResponse = "invalid_response"
+    case httpResponseRefused = "http_response_refused"
+    case playlistInvalid = "playlist_invalid_other"
+    case encryptionUnsupported = "encryption_unsupported"
+    case invalidKeyURI = "invalid_key_uri"
+    case invalidKeyLength = "invalid_key_length"
+    case keySizeLimitExceeded = "key_size_limit_exceeded"
+    case decryptionFailed = "decryption_failed"
+    case segmentFormatUnsupported = "segment_format_unsupported"
+    case ingestStalled = "ingest_stalled"
+    case demuxedAudioUnsupported = "demuxed_audio_unsupported"
+
+    static let userInfoKey = "AetherHLSDiagnosticReason"
+
+    /// Inspect only this SDK's domain/key and accept only known values, even through NSError wrappers.
+    static func preserved(in error: Error?) -> Self? {
+        var next = error as NSError?
+        for _ in 0..<6 {
+            guard let current = next else { break }
+            if current.domain == HLSIngestError.errorDomain,
+               let code = current.userInfo[userInfoKey] as? String,
+               let reason = Self(rawValue: code) { return reason }
+            next = current.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return nil
+    }
+}
+
 /// Terminal errors from the live HLS ingest. Every case causes a host fallback to the Jellyfin-mediated path. Phase-1 limits (encryption, fMP4) fall back deliberately rather than half-work.
 public enum HLSIngestError: Error, Equatable, CustomStringConvertible, LocalizedError, CustomNSError {
     case playlistUnreachable(status: Int)
@@ -43,5 +89,49 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible, Localized
         case .demuxedAudioNotSupported: 7
         }
     }
-    public var errorUserInfo: [String: Any] { [NSLocalizedDescriptionKey: description] }
+    public var errorUserInfo: [String: Any] {
+        [NSLocalizedDescriptionKey: description,
+         HLSIngestDiagnosticReason.userInfoKey: diagnosticReason.rawValue]
+    }
+
+    /// Keep the existing error codes and messages intact: this field never selects playback policy.
+    public var diagnosticReason: HLSIngestDiagnosticReason {
+        switch self {
+        case .playlistUnreachable(let status):
+            return (100...599).contains(status) ? .httpResponseRefused : .invalidResponse
+        case .playlistInvalid(let reason):
+            switch reason {
+            case "missing #EXTM3U": return .missingEXTM3U
+            case "missing TARGETDURATION": return .missingTargetDuration
+            case "no segments": return .noSegments
+            case "master playlist without variants": return .noVariants
+            case "no usable variant": return .noUsableVariant
+            case "selected variant is not a media playlist", "expected media playlist on refresh":
+                return .expectedMediaPlaylist
+            case "finite VOD requires EXT-X-ENDLIST": return .missingEndList
+            case "unresolvable segment URI": return .invalidSegmentURI
+            case "media sequence out of range": return .invalidMediaSequence
+            case "TARGETDURATION out of range": return .invalidTargetDuration
+            case "EXTINF out of range", "segment duration must be positive": return .invalidSegmentDuration
+            case "non-UTF8 playlist", "playlist is not bounded UTF-8": return .invalidPlaylistEncoding
+            default:
+                if reason.hasPrefix("playlist line exceeds ") { return .playlistLineLimitExceeded }
+                if reason.hasPrefix("playlist exceeds ") { return .playlistSizeLimitExceeded }
+                if reason.hasPrefix("segment exceeds ") || reason.hasPrefix("body exceeds ") {
+                    return .bodySizeLimitExceeded
+                }
+                if reason.hasPrefix("program duration exceeds ") { return .durationLimitExceeded }
+                return .playlistInvalid
+            }
+        case .encryptedNotSupported: return .encryptionUnsupported
+        case .segmentDecryptFailed(let reason):
+            if reason == "unresolvable key URI" { return .invalidKeyURI }
+            if reason.hasPrefix("key length ") { return .invalidKeyLength }
+            if reason.hasPrefix("key exceeds ") { return .keySizeLimitExceeded }
+            return .decryptionFailed
+        case .unsupportedSegmentFormat: return .segmentFormatUnsupported
+        case .ingestStalled: return .ingestStalled
+        case .demuxedAudioNotSupported: return .demuxedAudioUnsupported
+        }
+    }
 }

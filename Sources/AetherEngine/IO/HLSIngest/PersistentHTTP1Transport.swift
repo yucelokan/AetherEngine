@@ -39,13 +39,30 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
     /// GET `url` with `headers`, redirects followed under the #126 header policy. A non-2xx answer
     /// comes back with its status and whatever body it had, read to its end so the connection stays
     /// usable. Throws `BoundedFetch.Exceeded` for a 2xx body over `limit`.
-    func get(_ url: URL, headers: [String: String], limit: Int) async throws -> Response {
+    func get(_ url: URL, headers: [String: String], limit: Int,
+             diagnosticContext: SourceNetworkDiagnostics.Context? = nil,
+             role: String = "BoundedBody") async throws -> Response {
+        let trace = SourceNetworkDiagnostics.Trace(role: role, context: diagnosticContext)
+        do {
+            let answer = try await get(url, headers: headers, limit: limit, trace: trace)
+            trace.record("completed", originalURL: url, url: answer.response.url ?? url,
+                         status: answer.response.statusCode, bytes: Int64(answer.body.count))
+            return answer
+        } catch {
+            trace.record("completed", originalURL: url, url: url, error: error)
+            throw error
+        }
+    }
+
+    private func get(_ url: URL, headers: [String: String], limit: Int,
+                     trace: SourceNetworkDiagnostics.Trace) async throws -> Response {
         var target = url
         var hops = 0
         while true {
             let hopHeaders = RedirectHeaderPolicy.headersToReplay(
                 extraHeaders: headers, originalURL: url, redirectURL: target)
             let (head, body) = try await exchange(target, headers: hopHeaders, limit: limit)
+            trace.record("response", originalURL: url, url: target, status: head.status, bytes: Int64(body.count))
             if let location = HeldSourceConnection.redirectLocation(head) {
                 guard hops < Self.maxRedirects else {
                     throw PersistentHTTP1Connection.ConnectionError.tooManyRedirects
@@ -53,6 +70,7 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
                 guard let next = URL(string: location, relativeTo: target)?.absoluteURL else {
                     throw PersistentHTTP1Connection.ConnectionError.malformed("unresolvable Location: \(location)")
                 }
+                trace.record("redirect", originalURL: url, url: next, status: head.status)
                 hops += 1
                 target = next
                 continue

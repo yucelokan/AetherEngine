@@ -23,8 +23,18 @@ from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
   redirect, completion and transaction metrics. It never changes request policy.
   Events include URLs for host-side correlation: hosts must redact them before
   persistence. No headers, payloads, or error descriptions are exposed by this API.
+- HLS error diagnostics expose finite `HLSIngestDiagnosticReason` values through
+  `HLSIngestError` and `PlaybackErrorInfo`, preserving the existing numeric codes,
+  messages and error policy. Unknown reason text is mapped to a finite fallback.
+- Hosts may supply opaque playback/attempt UUIDs through
+  `LoadOptions.sourceDiagnosticsContext`. HLS readers and native carriage probes
+  capture that context before creating requests and retain it through internal
+  reloads. Late events cannot borrow a successor's identifiers; identifiers stay
+  in process and do not become HTTP headers. The held HTTP/1 transport and carriage
+  segment probes emit the same source-network event contract.
 - Regression tests cover mixed-case transport, HTTP refusal classes, connection
-  refusal, nested URL errors and real request evidence.
+  refusal, nested URL errors, finite HLS causes, delayed request ownership,
+  unattributed requests, header preservation and real request evidence.
 
 No app identity, provider credentials, routing policy or UI behavior is embedded.
 The earlier fourteen contributions remain incorporated in the integration base.

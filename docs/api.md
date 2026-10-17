@@ -51,6 +51,17 @@ So the string is a payload, not a key, and `$errorInfo` is the key. It publishes
 
 A failed custom-source probe publishes `.customSourceProbeFailed` with the probe error's `underlyingDomain` and `underlyingCode` when available. That information is set before the terminal `.error` state is delivered, so a state observer can read the cause from `errorInfo` without parsing the message. The engine's own live HLS ingest (`HLSLiveIngestReader`, which a known HLS playlist URL on the live path loads through) is the exception: when the probe failed because the live playlist was refused, the load publishes the origin's answer the way an HTTP reader's failed open does, `.sourceRateLimited` (429/503/509) or `.sourceRefused` with the status in `underlyingCode`, and `.liveSourceUnavailable` when the playlist could not be reached at all, so a host does not read a refusal as a stream it cannot play.
 
+`PlaybackErrorInfo.hlsDiagnosticReason` preserves an optional finite
+`HLSIngestDiagnosticReason` from an underlying `HLSIngestError`, including through
+Foundation error wrappers. `HLSIngestError.diagnosticReason` exposes the same value
+directly. Missing EXTM3U, missing TARGETDURATION, an empty segment list, invalid
+response/encoding, unsupported encryption and key/decryption failures have
+distinct stable raw values; an unknown playlist or decryption message becomes a
+finite fallback, never a new token containing that message. This adds diagnostic
+detail without changing `PlaybackErrorKind`, numeric error codes, error messages
+or recovery policy. The existing human-readable message remains arbitrary payload
+and is not safe structured telemetry.
+
 Two kinds carry a number a host will want to read, and both mean the same thing happened: the origin answered the source request with an HTTP status instead of media, and `underlyingCode` is that status. `.sourceRefused` is the origin's verdict on the resource or on itself (a 401/403 refusal, which on a connection-capped IPTV panel most often means "the slot is still held", a 404, a 5xx). `.sourceRateLimited` is the same answer in the rate-limit shapes (429/503/509), split off because the recovery differs: the source is being metered, not lost, so the same request is expected to work later and a handoff to a second player meets the same meter (AE#377). Both are distinct from `.sourceOpenFailed`, which is what a corrupt or unreadable source produces; before `.sourceRefused` existed a refusal and a corrupt file arrived alike as "Invalid data found when processing input".
 
 `.sourceCertificateRejected` is the same argument one layer lower: the transport was refused over certificate trust, so there was never a response to carry a status. `underlyingCode` is the `NSURLErrorDomain` code (-1200 through -1206), and the message is the engine's own English sentence rather than the OS one, so a pasted report says the same thing on every device. It reaches a host from either path: on the FFmpeg path the reader types the failed open, and on the native path the URL error is found under AVFoundation's own error, which is where it sits and where nothing used to look. Nothing about the media is wrong and no retry helps; a self-signed or private-CA origin needs a trust decision the host makes (AE#495).
@@ -1210,6 +1221,31 @@ as well.
 
 ## Diagnostics
 
+`SourceNetworkDiagnostics.handler` optionally observes real source-request events.
+It runs on the emitting thread, so a host callback must be thread-safe and
+non-blocking. `SourceNetworkDiagnostics.Event` carries a per-request `requestID`,
+`role`, `phase`, status/URL error code, byte/timing metrics and optional `context`.
+It does not contain response bodies, header values or localized errors. Its
+`originalURL` and `url` are raw source URLs for host-side correlation: the host must
+redact them before persistence or forwarding and must choose its own logging and
+retention policy. Installing a handler does not change request or TLS policy.
+
+For source ownership, set `LoadOptions.sourceDiagnosticsContext` to a
+`SourceNetworkDiagnostics.Context(playbackID:attemptID:)` before `load()`. Both
+UUIDs are opaque host-owned identifiers; the engine neither creates a host session
+nor sends the identifiers in HTTP headers or URLs. The optional task-local
+`SourceNetworkDiagnostics.context` supplies the same context while constructing a
+standalone `HLSLiveIngestReader(playlistURL:httpHeaders:diagnosticContext:)` or
+other instrumented reader. An explicit `diagnosticContext` selects that reader's
+context instead. HLS playlist, segment, key and carriage-probe requests capture
+their context at creation, retain it through redirects/completion and retain the
+source's context across internal reader reloads. A late event keeps the outgoing
+attempt's identifiers. A request without context remains unattributed; a handler
+must not fill it from whichever player happens to be active when it arrives.
+The held HTTP/1 HLS transport emits the same event contract. AVPlayer's own internal
+network requests are not exposed, and a source path without instrumentation or
+captured context cannot be attributed by this API.
+
 `LoadOptions.nativeVideoFrameDiagnostics` opts into decoded-frame observation on SDR native
 loopback playback. It defaults to `false`; remote bypass, HDR, external playback, mobile
 background activity, PiP (including its foreground transition), pause and seek are excluded. An additional `AVPlayerItemVideoOutput`
@@ -1282,6 +1318,7 @@ All flags default to safe values; the table is the full set. Depth for the media
 
 | Option | Default | What it does |
 | --- | --- | --- |
+| `sourceDiagnosticsContext` | nil | Optional opaque `SourceNetworkDiagnostics.Context` retained by HLS requests and internal reloads for host-side diagnostics. No wire headers, request-policy or playback effect. |
 | `httpHeaders` | empty | Extra headers on every probe, range and segment fetch. On `nativeRemoteHLS` they ride into the `AVURLAsset`, so header-enforcing IPTV origins work. Forwarded to sidecar subtitle fetches unless overridden. **Scoping differs by route.** On the plain `nativeRemoteHLS` bypass AVFoundation itself sends them to every host the playlists name (cross-host variants, segments and `EXT-X-KEY` URIs) and carries them across 302 redirects, so credential headers there reach every such host and the engine cannot narrow that. The per-origin credential scoping described for `HLSLiveIngestReader` applies only on the routes the engine fetches itself: the ingest, the disc reader, the origin relay, the subtitle proxy, the audio tap and the live subtitle renditions. A credential that must not reach every host a playlist names should not ride in `httpHeaders` on the bypass. |
 | `isLive` | false | Treat the source as live. Set it explicitly; duration-based auto-detection is too noisy. |
 | `dvrWindowSeconds` | nil | Timeshift window. nil means live-only and `seek` is a no-op. The window is a ceiling: the disk budget (a quarter of the free space, at most 2 GiB) bounds what is actually kept, so a long window on a high-bitrate channel or a small volume holds less than it asks for. With several engines running, each one's quarter is taken from the free space the others have not already claimed, so a tile added on a tight volume holds less history than the first one (AE#687). |

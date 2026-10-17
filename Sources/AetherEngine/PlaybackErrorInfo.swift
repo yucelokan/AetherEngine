@@ -115,17 +115,21 @@ public struct PlaybackErrorInfo: Sendable, Equatable {
     public let underlyingDomain: String?
     /// `NSError.code` of the failure underneath, or a reader's own code where one exists.
     public let underlyingCode: Int?
+    /// Finite HLS subreason; unlike the human-readable message, safe for support telemetry.
+    public let hlsDiagnosticReason: HLSIngestDiagnosticReason?
     /// The same text `state` carries.
     public let message: String
 
     public init(kind: PlaybackErrorKind,
                 message: String,
                 underlyingDomain: String? = nil,
-                underlyingCode: Int? = nil) {
+                underlyingCode: Int? = nil,
+                hlsDiagnosticReason: HLSIngestDiagnosticReason? = nil) {
         self.kind = kind
         self.message = message
         self.underlyingDomain = underlyingDomain
         self.underlyingCode = underlyingCode
+        self.hlsDiagnosticReason = hlsDiagnosticReason
     }
 
     /// Captures domain and code off a Foundation / AVFoundation error, which is the half of the
@@ -135,7 +139,8 @@ public struct PlaybackErrorInfo: Sendable, Equatable {
         self.init(kind: kind,
                   message: message,
                   underlyingDomain: nsError?.domain,
-                  underlyingCode: nsError?.code)
+                  underlyingCode: nsError?.code,
+                  hlsDiagnosticReason: .preserved(in: underlying))
     }
 }
 

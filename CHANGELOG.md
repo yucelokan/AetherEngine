@@ -10,7 +10,17 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Typed HLS diagnostic subreasons.** `HLSIngestError.diagnosticReason` and
+  `PlaybackErrorInfo.hlsDiagnosticReason` distinguish malformed playlist, response,
+  encryption and segment failures with finite `HLSIngestDiagnosticReason` values.
+  Existing error codes, messages and playback decisions are unchanged.
+- **Optional source-request correlation.** `LoadOptions.sourceDiagnosticsContext`
+  accepts host-owned `SourceNetworkDiagnostics.Context` identifiers. HLS playlist,
+  segment and key requests retain that context across delayed completion and
+  internal reloads; the identifiers are never sent to the origin. Source-network
+  events also cover the held HTTP/1 transport and carriage segment probes.
 
 ## [7.39.0] - 2026-10-17
 

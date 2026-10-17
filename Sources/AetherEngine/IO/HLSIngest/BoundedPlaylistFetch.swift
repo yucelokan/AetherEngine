@@ -57,7 +57,7 @@ enum BoundedFetch {
     static func data(for request: URLRequest, session: URLSession, limit: Int, role: String = "BoundedBody") async throws
         -> (Data, URLResponse)
     {
-        let delegate = BoundedBodyDelegate(limit: limit, role: role)
+        let delegate = BoundedBodyDelegate(limit: limit, role: role, context: SourceNetworkDiagnostics.context(for: request))
         defer { withExtendedLifetime(delegate) {} }
         let task = session.dataTask(with: request)
         task.delegate = delegate
@@ -108,9 +108,9 @@ private final class BoundedBodyDelegate: EngineTLS.RedirectScrubbingDelegate, UR
     private var onOutcome: ((Outcome) -> Void)?
     private var landed: Outcome?
 
-    init(limit: Int, role: String) {
+    init(limit: Int, role: String, context: SourceNetworkDiagnostics.Context?) {
         self.limit = limit
-        trace = .init(role: role)
+        trace = .init(role: role, context: context)
         super.init()
     }
 

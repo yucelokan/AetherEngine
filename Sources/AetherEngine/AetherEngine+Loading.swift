@@ -580,6 +580,7 @@ extension AetherEngine {
                   // AE#154: a VOD resume anchor seeks; nil keeps the live no-initial-seek contract.
                   skipInitialSeek: startPosition == nil,
                   inPlaceSwap: inPlaceHandover,
+                  diagnosticContext: options.sourceDiagnosticsContext,
                   contract: .init(
                       isLive: options.isLive,
                       // AE#440: the same join tail exists where AVPlayer owns the buffer; the engine only
@@ -762,7 +763,8 @@ extension AetherEngine {
         if rememberVerdict { rerouteVerdictMemory.record(url, now: Date()) }
         var options = loadedOptions
         options.nativeRemoteHLS = false
-        let reader = HLSLiveIngestReader(playlistURL: url, httpHeaders: options.httpHeaders)
+        let reader = HLSLiveIngestReader(playlistURL: url, httpHeaders: options.httpHeaders,
+                                        diagnosticContext: options.sourceDiagnosticsContext)
         do {
             _ = try await load(source: .custom(reader, formatHint: "mpegts"), options: options)
         } catch is CancellationError {
@@ -1880,6 +1882,7 @@ extension AetherEngine {
                   skipInitialSeek: LiveReloadPolicy.skipInitialSeek(
                       isLive: isLive, isRejoin: liveRejoin),
                   inPlaceSwap: inPlaceHandover,
+                  diagnosticContext: loadedOptions.sourceDiagnosticsContext,
                   contract: .init(
                       isLive: isLive,
                       // AE#440: the join tail, opt-in. The host itself gates this on `isLive`.

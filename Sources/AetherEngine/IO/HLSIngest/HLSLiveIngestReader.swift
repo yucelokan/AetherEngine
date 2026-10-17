@@ -206,8 +206,10 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// reader, so header-enforcing IPTV origins (Referer / User-Agent / Authorization, #119) accept the
     /// ingest the same way they accept the AVPlayer bypass (AetherEngine#168). Credential headers go
     /// only to `playlistURL`'s origin with no TLS downgrade (audit NET-7).
-    public convenience init(playlistURL: URL, httpHeaders: [String: String]) {
-        self.init(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo)
+    public convenience init(playlistURL: URL, httpHeaders: [String: String],
+                            diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context) {
+        self.init(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo,
+                  diagnosticContext: diagnosticContext)
     }
 
     /// #199: fresh reader over the same playlist URL and headers, for the in-engine live reopen of an
@@ -216,11 +218,16 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     /// audio reader's lifetime is owned by its parent and never reopens independently.
     func makeFreshMainReader() -> HLSLiveIngestReader? {
         guard role == .mainVideo else { return nil }
-        return HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo)
+        return HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo,
+                                   diagnosticContext: diagnosticContext)
     }
 
+    private let diagnosticContext: SourceNetworkDiagnostics.Context?
+
     init(playlistURL: URL, httpHeaders: [String: String] = [:], role: Role,
-         credentialOrigin: URL? = nil) {
+         credentialOrigin: URL? = nil,
+         diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context) {
+        self.diagnosticContext = diagnosticContext
         self.playlistURL = playlistURL
         self.httpHeaders = httpHeaders
         self.credentialOrigin = credentialOrigin ?? playlistURL
@@ -561,7 +568,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
                 )
                 installCompanion(HLSLiveIngestReader(
                     playlistURL: audioURL, httpHeaders: httpHeaders, role: .companionAudio,
-                    credentialOrigin: credentialOrigin))
+                    credentialOrigin: credentialOrigin, diagnosticContext: diagnosticContext))
             }
             // AE#359: the variant's SUBTITLES group, resolved to absolute playlist URLs and published as
             // metadata. Nothing is fetched here; the host decides whether a subtitle track is ever wanted.
@@ -775,7 +782,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
             httpHeaders, grantedFor: credentialOrigin, sentTo: url) {
             request.setValue(value, forHTTPHeaderField: field)
         }
-        return request
+        return SourceNetworkDiagnostics.request(request, context: diagnosticContext)
     }
 
     /// Fetch + parse a playlist. Returns parsed playlist and final URL after redirects (relative segment URIs resolve against it).

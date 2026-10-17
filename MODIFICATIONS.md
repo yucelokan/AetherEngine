@@ -1,10 +1,13 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-17. Integration base: upstream 7.38.1
-(`ce1670f8c6c4b8b11a8020e9c40a10c0d6da9823`). The source-failure diagnostics
+Updated: 2026-10-17. Integration base: upstream 7.39.0
+(`834f5fd4e15057b8f5a91ecc3c4b2113da5f7261`). The source-failure diagnostics
 from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
 
 ## Current differences
+
+- The length-less read-loss fixture waits for a successful open before cutting the
+  body, so the regression measures a mid-read failure rather than an initial refusal.
 
 - HTTP scheme dispatch is case insensitive.
 - HLS ingest preserves terminal transport errors, segment retry failures and key HTTP

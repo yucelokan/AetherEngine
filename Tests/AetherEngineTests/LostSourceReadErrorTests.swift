@@ -13,8 +13,9 @@ struct LostSourceReadErrorTests {
         let port: UInt16
         private let listener: LoopbackListener
         private let bodyBytes: Int
-        private let lock = NSLock()
+        private let lock = NSCondition()
         private var stopped = false
+        private var bodyCutRequested = false
         private var isStopped: Bool {
             lock.lock()
             defer { lock.unlock() }
@@ -35,8 +36,16 @@ struct LostSourceReadErrorTests {
         func stop() {
             lock.lock()
             stopped = true
+            lock.broadcast()
             lock.unlock()
             listener.stop()
+        }
+
+        func cutBody() {
+            lock.lock()
+            bodyCutRequested = true
+            lock.broadcast()
+            lock.unlock()
         }
 
         private func serve(_ fd: Int32) {
@@ -64,6 +73,13 @@ struct LostSourceReadErrorTests {
                     sent += n
                 }
             }
+            if !isHead {
+                // Prove a mid-read loss: CFNetwork may otherwise reject the truncated body
+                // before delivering any data, correctly turning this into an open failure.
+                lock.lock()
+                while !bodyCutRequested && !stopped { lock.wait() }
+                lock.unlock()
+            }
             // Half-close, as `ThrottledOriginServer.serveThenDrop` does: a full close can turn into
             // an RST that discards bytes the reader has not been handed yet.
             shutdown(fd, SHUT_WR)
@@ -89,6 +105,10 @@ struct LostSourceReadErrorTests {
                                 prefetchEnabled: false)
         defer { reader.markClosed(); reader.close() }
         try reader.open()
+        var firstByte: UInt8 = 0
+        let firstRead = withUnsafeMutablePointer(to: &firstByte) { reader.read(into: $0, size: 1) }
+        try #require(firstRead == 1)
+        origin.cutBody()
         #expect(drain(reader) == FFmpegErr.eio)
     }
 

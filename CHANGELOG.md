@@ -12,6 +12,10 @@ the public-API contract.
 
 ### Fixed
 
+- **Purgeable-history test determinism.** Check the no-eviction case while packets
+  are unread; consumed history may already have been emptied by the kernel before
+  the test requests a purge. Eviction, stale-cursor refusal and unread data checks
+  remain intact. No packet-store behavior changes.
 - **Source-open recovery.** Retiring an unsuccessful ranged connection also retires
   its transport error, so a successful forward-only replacement can open. Refusals
   from the replacement are still reported.

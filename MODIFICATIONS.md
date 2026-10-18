@@ -1,7 +1,7 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-17. Integration base: upstream 7.39.0
-(`834f5fd4e15057b8f5a91ecc3c4b2113da5f7261`). The source-failure diagnostics
+Updated: 2026-10-18. Integration base: upstream 7.40.1
+(`93d54e5067ca0ad856259c0ebc1693aeafa20677`). The source-failure diagnostics
 from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
 
 ## Current differences
@@ -38,7 +38,9 @@ from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
   capture that context before creating requests and retain it through internal
   reloads. Late events cannot borrow a successor's identifiers; identifiers stay
   in process and do not become HTTP headers. The held HTTP/1 transport and carriage
-  segment probes emit the same source-network event contract.
+  segment probes emit the same source-network event contract. Streamed persistent
+  bodies retain that context until their actual completion, failure or cancellation;
+  header delivery does not prematurely complete the diagnostic event.
 - Regression tests cover mixed-case transport, HTTP refusal classes, connection
   refusal, nested URL errors, finite HLS causes, delayed request ownership,
   unattributed requests, header preservation and real request evidence. The exact
@@ -86,7 +88,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.39.0 integration.
+and is included in the current 7.40.1 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

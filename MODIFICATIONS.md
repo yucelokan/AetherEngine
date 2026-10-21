@@ -1,7 +1,7 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-19. Integration base: upstream 7.42.0
-(`f5af2a389695021af6f3aee86dfd8e485cc2c975`). The source-failure diagnostics
+Updated: 2026-10-21. Integration base: upstream 7.44.0
+(`e5ea8dac56a6962d7f6793fc80b7c84caa61b7af`). The source-failure diagnostics
 from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
 
 ## Current differences

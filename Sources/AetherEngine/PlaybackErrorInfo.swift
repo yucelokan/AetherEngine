@@ -179,13 +179,16 @@ extension AetherEngine {
     /// `sourceRateLimited`, not `sourceRefused` (#377): the source is not gone, the same request is
     /// expected to work later, and a host that reacts to a refusal by handing off to a second player
     /// would have that player metered by the same origin. Anything the reader did not type keeps the
-    /// historical `sourceOpenFailed` with whatever was underneath.
+    /// historical `sourceOpenFailed` with whatever was underneath. A failed live start keeps
+    /// `liveSourceUnavailable`; preserving its cause must not change the host's recovery contract.
     @MainActor
-    func publishLoadFailure(_ error: Error) {
+    func publishLoadFailure(_ error: Error, isLiveStart: Bool = false) {
         if let ingest = error as? HLSIngestError {
             switch ingest {
             case .playlistUnreachable(let status) where status > 0:
-                publishLoadFailure(AVIOReaderError.httpStatus(status))
+                publishLoadFailure(AVIOReaderError.httpStatus(status), isLiveStart: isLiveStart)
+            case _ where isLiveStart:
+                publishError(.liveSourceUnavailable, "Live source unavailable", underlying: ingest)
             case .encryptedNotSupported, .unsupportedSegmentFormat, .demuxedAudioNotSupported:
                 publishError(.hlsFormatUnsupported, "HLS format unsupported", underlying: ingest)
             default:
@@ -216,6 +219,15 @@ extension AetherEngine {
             publishError(PlaybackErrorInfo(kind: kind,
                                            message: "Failed to load: \(error.localizedDescription)",
                                            underlyingCode: status))
+            return
+        }
+        if isLiveStart {
+            if let code = SourceNetworkDiagnostics.urlErrorCode(error) {
+                publishError(PlaybackErrorInfo(kind: .liveSourceUnavailable, message: "Live source unavailable",
+                                               underlyingDomain: NSURLErrorDomain, underlyingCode: code))
+            } else {
+                publishError(.liveSourceUnavailable, "Live source unavailable", underlying: error)
+            }
             return
         }
         publishError(.sourceOpenFailed, "Failed to load: \(error.localizedDescription)", underlying: error)

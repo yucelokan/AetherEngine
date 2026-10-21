@@ -1178,6 +1178,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// #240: which reader this is, for the connection log. Several readers run against the same
     /// origin at once and the line used to name none of them.
     private let label: String
+    private let diagnosticContext: SourceNetworkDiagnostics.Context?
     private let sourceOpenPolicy: SourceOpenPolicy
     private let openDiagnosticID = String(UUID().uuidString.prefix(8))
     /// Only static controlled probes use this; playback retains its existing transport policy.
@@ -1187,7 +1188,8 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     private let probeDrainLock = NSLock()
     private var drainingProbeRequest = false
 
-    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, persistentRequestSession: URLSession? = nil, backoffScale: Double = 1, pinIdleSeconds: TimeInterval = AVIOReader.pinIdleRepinSecondsDefault, liveRefusalRetryBudget: TimeInterval = AVIOReader.liveRefusalRetryBudget) {
+    init(url: URL, extraHeaders: [String: String] = [:], label: String = "source", chunkSize: Int = 4 * 1024 * 1024, prefetchEnabled: Bool = true, isLive: Bool = false, chunkRequestTimeout: TimeInterval = 35, chunkMaxRetries: Int = 3, boundedInitialFetch: Int64? = nil, sequentialOnly: Bool = false, connStallTimeout: TimeInterval = AVIOReader.connStallTimeoutDefault, windowHighWater: Int? = nil, streamHighWater: Int? = nil, detourIdleSeconds: TimeInterval? = nil, detourFetchBudget: TimeInterval? = nil, heldConnection: Bool = false, probeControl: ProbeControl? = nil, probeRequestSession: URLSession? = nil, sourceOpenPolicy: SourceOpenPolicy = .init(), requestHeaderStore: RequestHeaderStore? = nil, backoffScale: Double = 1, pinIdleSeconds: TimeInterval = AVIOReader.pinIdleRepinSecondsDefault, liveRefusalRetryBudget: TimeInterval = AVIOReader.liveRefusalRetryBudget, persistentRequestSession: URLSession? = nil, diagnosticContext: SourceNetworkDiagnostics.Context? = SourceNetworkDiagnostics.context) {
+        self.diagnosticContext = diagnosticContext
         self.sourceOpenPolicy = sourceOpenPolicy
         self.persistentRequestSession = persistentRequestSession
         self.probeControl = probeControl
@@ -1301,7 +1303,10 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             // rather than queueing behind it. It asks for a suffix range, which needs no size and
             // therefore needs nothing this open has learned yet. A warm that already carries the
             // trailing object has no use for it.
-            if warm?.tail == nil {
+            // A fully resident head already contains the suffix too. Do not start an asynchronous
+            // request for bytes this open has adopted in their entirety.
+            let fullyWarmed = warm.map { $0.head.end >= $0.contentLength } ?? false
+            if warm?.tail == nil, !fullyWarmed {
                 startTailPrefetch()
             }
             // Playback path. The persistent connection's `Range: bytes=0-` request is itself
@@ -3187,6 +3192,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
         let delegate = TailPrefetchDelegate(
             expectedLength: Self.tailPrefetchBytes,
+            diagnosticContext: diagnosticContext,
             extraHeaders: headers(for: request.url)
         )
         // #281 retest: one line per open, and the line the field needs. The advertised way to check
@@ -3510,6 +3516,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         } else {
             let delegate = PersistentReadDelegate(
                 reader: self,
+                diagnosticContext: diagnosticContext,
                 generation: generation,
                 extraHeaders: headers(for: request.url),
                 ticket: ticket,
@@ -4048,6 +4055,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let semaphore = DispatchSemaphore(value: 0)
 
         let delegate = StreamingDelegate(
+            diagnosticContext: diagnosticContext,
             extraHeaders: headers(for: request.url),
             onResponse: { [weak self] response in
                 // Advisory length for the EOF/EIO distinction; -1 (chunked / unknown) leaves the
@@ -4497,7 +4505,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { lease.release() }
         guard !scope.isStopped, !isClosed, remaining() > 0 else { return -1 }
         request.timeoutInterval = max(0.001, remaining())
-        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url))
+        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url), diagnosticContext: diagnosticContext)
         let task = Self.probeSession.dataTask(with: request)
         task.delegate = delegate
         let completion = DispatchSemaphore(value: 0)
@@ -4561,7 +4569,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let lease = OriginRequestBudget.Lease(ticket)
         defer { lease.release() }
 
-        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url))
+        let delegate = ProbeDelegate(extraHeaders: headers(for: request.url), diagnosticContext: diagnosticContext)
         let task = (probeRequestSession ?? Self.probeSession).dataTask(with: request)
         task.delegate = delegate
 
@@ -4791,9 +4799,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         return Int(min(declaredLength, ceiling))
     }
 
-    /// #255 test hook: the largest up-front body reservation any chunk fetch has asked for since the
-    /// last reset. Written on the delegate queue, read once the fetch it belongs to has completed.
-    nonisolated(unsafe) static var peakBodyReserveForTesting = 0
+    /// #255 test hook: the largest up-front body reservation any of THIS reader's chunk fetches has
+    /// asked for. Per reader, not process-wide, so a suite running in parallel cannot raise it.
+    /// Lock-protected; raised from each fetch's delegate.
+    var peakBodyReserveForTesting: Int { peakBodyReserveLock.withLock { peakBodyReserve } }
+    private let peakBodyReserveLock = NSLock()
+    private var peakBodyReserve = 0
 
     private func requestTicket(for url: URL, label: String,
                                timeout: TimeInterval, shouldAbort: (() -> Bool)? = nil,
@@ -4861,9 +4872,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         defer { lease.release() }
 
         let delegate = ChunkFetchDelegate(extraHeaders: headers(for: request.url),
-                                          bodyLimit: Self.expectedBodyBytes(for: request))
+                                          bodyLimit: Self.expectedBodyBytes(for: request), diagnosticContext: diagnosticContext)
         let task = (probeRequestSession ?? Self.chunkSession).dataTask(with: request)
         task.delegate = delegate
+        delegate.onBodyReserve = { [weak self] reserve in
+            guard let self else { return }
+            self.peakBodyReserveLock.withLock { self.peakBodyReserve = max(self.peakBodyReserve, reserve) }
+        }
 
         let semaphore = DispatchSemaphore(value: 0)
         delegate.onCompletion = { [weak self] response in
@@ -5178,7 +5193,7 @@ extension URLSessionDataTask: PersistentTransfer {
 }
 
 private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let sourceTrace = SourceNetworkDiagnostics.Trace(role: "PersistentRead")
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     weak var reader: AVIOReader?
     let generation: Int
     let extraHeaders: [String: String]
@@ -5191,8 +5206,9 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
     /// The URL this connection was opened against, for the one-per-origin transport line.
     private let originURL: URL
 
-    init(reader: AVIOReader, generation: Int, extraHeaders: [String: String],
+    init(reader: AVIOReader, diagnosticContext: SourceNetworkDiagnostics.Context?, generation: Int, extraHeaders: [String: String],
          ticket: OriginRequestBudget.Ticket?, originURL: URL) {
+        self.sourceTrace = .init(role: .persistentRead, context: diagnosticContext)
         self.reader = reader
         self.generation = generation
         self.extraHeaders = extraHeaders
@@ -5302,7 +5318,7 @@ private final class PersistentReadDelegate: NSObject, URLSessionDataDelegate, @u
 /// dispatch_data is released per delivery. @unchecked Sendable: ownership
 /// via semaphore ensures no concurrent access to mutable fields.
 private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let sourceTrace = SourceNetworkDiagnostics.Trace(role: "ChunkFetch")
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     let extraHeaders: [String: String]
     /// Most this fetch will ever buffer, nil when the request is open-ended (#255). Derived from
     /// the request, never from the response: a declared length is the origin's claim about the
@@ -5316,8 +5332,11 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
     var truncated = false
     var onCompletion: ((HTTPURLResponse?) -> Void)?
     var onResolved: ((URL) -> Void)?
+    /// Reports the up-front reservation each response asked for (#255 test hook).
+    var onBodyReserve: ((Int) -> Void)?
 
-    init(extraHeaders: [String: String], bodyLimit: Int?) {
+    init(extraHeaders: [String: String], bodyLimit: Int?, diagnosticContext: SourceNetworkDiagnostics.Context?) {
+        self.sourceTrace = .init(role: .chunkFetch, context: diagnosticContext)
         self.extraHeaders = extraHeaders
         self.bodyLimit = bodyLimit
     }
@@ -5354,8 +5373,7 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
         if let http = response as? HTTPURLResponse {
             let reserve = AVIOReader.bodyReservation(
                 declaredLength: http.expectedContentLength, limit: bodyLimit)
-            AVIOReader.peakBodyReserveForTesting = max(
-                AVIOReader.peakBodyReserveForTesting, reserve)
+            onBodyReserve?(reserve)
             if reserve > 0 { body.reserveCapacity(reserve) }
             let status = http.statusCode
             if status == 200 || status == 206,
@@ -5420,7 +5438,7 @@ private final class ChunkFetchDelegate: NSObject, URLSessionDataDelegate, @unche
 // MARK: - Streaming Delegate
 
 private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
-    private let sourceTrace = SourceNetworkDiagnostics.Trace(role: "Streaming")
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     let onData: @Sendable (Data) -> Void
     let onComplete: @Sendable (Error?) -> Void
     /// Response hook (advisory Content-Length capture on the sequential-origin path).
@@ -5436,6 +5454,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
     let extraHeaders: [String: String]
 
     init(
+        diagnosticContext: SourceNetworkDiagnostics.Context?,
         extraHeaders: [String: String] = [:],
         onResponse: (@Sendable (URLResponse) -> Void)? = nil,
         onRefused: (@Sendable (Int, URL?) -> Void)? = nil,
@@ -5443,6 +5462,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
         onComplete: @escaping @Sendable (Error?) -> Void
     ) {
         self.extraHeaders = extraHeaders
+        self.sourceTrace = .init(role: .streaming, context: diagnosticContext)
         self.onResponse = onResponse
         self.onRefused = onRefused
         self.onData = onData
@@ -5516,7 +5536,7 @@ private final class StreamingDelegate: NSObject, URLSessionDataDelegate {
 /// captures total from Content-Range, cancels before the body streams.
 /// @unchecked Sendable: single-use per probe, semaphore ownership prevents concurrency.
 private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let sourceTrace = SourceNetworkDiagnostics.Trace(role: "Probe")
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     let extraHeaders: [String: String]
     var totalSize: Int64?
     var statusCode: Int = 0
@@ -5525,7 +5545,8 @@ private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked 
     var onCompletion: ((HTTPURLResponse?) -> Void)?
     var onResolved: ((URL) -> Void)?
 
-    init(extraHeaders: [String: String]) {
+    init(extraHeaders: [String: String], diagnosticContext: SourceNetworkDiagnostics.Context?) {
+        self.sourceTrace = .init(role: .probe, context: diagnosticContext)
         self.extraHeaders = extraHeaders
     }
 
@@ -5662,7 +5683,7 @@ final class SuffixRangeSupport: @unchecked Sendable {
 /// whole file. That body is rejected at the header, before a byte of it is accepted, and the
 /// collected length is capped besides, so a lying `Content-Range` cannot grow this either.
 private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let sourceTrace = SourceNetworkDiagnostics.Trace(role: "TailPrefetch")
+    private let sourceTrace: SourceNetworkDiagnostics.Trace
     enum Outcome {
         case span(Int64, Data)
         /// Named so the log says WHICH way an origin declined, since "no suffix ranges", "a 200 with
@@ -5692,7 +5713,8 @@ private final class TailPrefetchDelegate: NSObject, URLSessionDataDelegate, @unc
     /// silent failure would be a caller waiting out its whole budget for bytes that are never coming.
     var onOutcome: ((Outcome) -> Void)?
 
-    init(expectedLength: Int, extraHeaders: [String: String]) {
+    init(expectedLength: Int, diagnosticContext: SourceNetworkDiagnostics.Context?, extraHeaders: [String: String]) {
+        self.sourceTrace = .init(role: .tailPrefetch, context: diagnosticContext)
         self.expectedLength = expectedLength
         self.extraHeaders = extraHeaders
     }

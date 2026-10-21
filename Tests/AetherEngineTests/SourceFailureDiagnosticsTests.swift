@@ -78,10 +78,10 @@ struct SourceFailureDiagnosticsTests {
             #expect(throws: AVIOReaderError.httpStatus(status)) { try result.get() }
         }
         #expect(events.snapshot().contains {
-            $0.role == "PersistentRead" && $0.phase == "completed" && $0.urlErrorCode == NSURLErrorNetworkConnectionLost
+            $0.role == .persistentRead && $0.phase == .completed && $0.urlErrorCode == NSURLErrorNetworkConnectionLost
         })
         #expect(events.snapshot().contains {
-            $0.role == "PersistentRead" && $0.phase == "response" && $0.status == 206
+            $0.role == .persistentRead && $0.phase == .response && $0.status == 206
         })
         #expect(server.requests.contains { $0.method == "GET" && $0.range == nil })
     }
@@ -128,25 +128,25 @@ struct SourceFailureDiagnosticsTests {
         }
         let replacementRequest = SourceNetworkDiagnostics.request(URLRequest(url: replacementURL), context: replacement)
         _ = try await BoundedPlaylistFetch.data(for: replacementRequest, session: session, limit: 1_024)
-        #expect(!events.snapshot().contains { $0.originalURL == oldURL && $0.phase == "completed" })
+        #expect(!events.snapshot().contains { $0.originalURL == oldURL && $0.phase == .completed })
         releaseOld.signal()
         let (_, oldResponse) = try await oldFetch.value
         #expect((oldResponse as? HTTPURLResponse)?.statusCode == 200)
 
         // Other suites can emit the same phase and role through the process-wide handler.
         let unrelatedURL = baseURL.appendingPathComponent("unrelated.m3u8")
-        SourceNetworkDiagnostics.Trace(role: "HLSPlaylist", context: replacement)
-            .record("completed", originalURL: unrelatedURL, url: unrelatedURL, status: 200)
+        SourceNetworkDiagnostics.Trace(role: .hlsPlaylist, context: replacement)
+            .record(.completed, originalURL: unrelatedURL, url: unrelatedURL, status: 200)
         let completed = events.snapshot().filter {
-            $0.phase == "completed" && $0.role == "HLSPlaylist"
+            $0.phase == .completed && $0.role == .hlsPlaylist
                 && $0.originalURL.map { fixtureURLs.contains($0) } == true
         }
         #expect(completed.map(\.originalURL) == [retryURL, replacementURL, oldURL])
         #expect(Set(completed.map(\.requestID)).count == 3)
         for (url, expected) in [(oldURL, old), (retryURL, retry), (replacementURL, replacement)] {
             let requestEvents = events.snapshot().filter { $0.originalURL == url }
-            #expect(requestEvents.contains { $0.phase == "response" })
-            #expect(requestEvents.contains { $0.phase == "completed" })
+            #expect(requestEvents.contains { $0.phase == .response })
+            #expect(requestEvents.contains { $0.phase == .completed })
             #expect(requestEvents.allSatisfy { $0.context == expected })
             #expect(Set(requestEvents.map(\.requestID)).count == 1)
         }
@@ -194,22 +194,22 @@ struct SourceFailureDiagnosticsTests {
         let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
         let url = URL(string: "https://origin.example/\(UUID().uuidString)/segment.ts")!
         let trace = SourceNetworkDiagnostics.$context.withValue(original) {
-            SourceNetworkDiagnostics.Trace(role: "HLSSegment")
+            SourceNetworkDiagnostics.Trace(role: .hlsSegment)
         }
         let tagged = SourceNetworkDiagnostics.request(URLRequest(url: url), context: original)
         let unbound = SourceNetworkDiagnostics.request(tagged, context: nil)
         #expect(SourceNetworkDiagnostics.context(for: tagged) == original)
         #expect(SourceNetworkDiagnostics.context(for: unbound) == nil)
         SourceNetworkDiagnostics.$context.withValue(replacement) {
-            trace.record("response", originalURL: url, url: url, status: 200)
-            trace.record("completed", originalURL: url, url: url, status: 200)
-            let unboundTrace = SourceNetworkDiagnostics.Trace(role: "HLSKey",
+            trace.record(.response, originalURL: url, url: url, status: 200)
+            trace.record(.completed, originalURL: url, url: url, status: 200)
+            let unboundTrace = SourceNetworkDiagnostics.Trace(role: .hlsKey,
                 context: SourceNetworkDiagnostics.context(for: unbound))
-            unboundTrace.record("completed", originalURL: url, url: url, status: 200)
+            unboundTrace.record(.completed, originalURL: url, url: url, status: 200)
         }
         let unrelatedURL = url.deletingLastPathComponent().appendingPathComponent("unrelated.ts")
-        SourceNetworkDiagnostics.Trace(role: "HLSSegment", context: original)
-            .record("completed", originalURL: unrelatedURL, url: unrelatedURL, status: 200)
+        SourceNetworkDiagnostics.Trace(role: .hlsSegment, context: original)
+            .record(.completed, originalURL: unrelatedURL, url: unrelatedURL, status: 200)
         let captured = events.snapshot().filter { $0.originalURL == url }
         #expect(captured.count == 3)
         #expect(captured[0].context == original && captured[1].context == original)
@@ -245,9 +245,9 @@ struct SourceFailureDiagnosticsTests {
             #expect(status == 403)
         }
         let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.filter { $0.phase == "response" }.count == 1)
-        #expect(captured.filter { $0.phase == "completed" }.count == 1)
-        #expect(captured.allSatisfy { $0.context == original && $0.role == "HLSSegment" && $0.status == status })
+        #expect(captured.filter { $0.phase == .response }.count == 1)
+        #expect(captured.filter { $0.phase == .completed }.count == 1)
+        #expect(captured.allSatisfy { $0.context == original && $0.role == .hlsSegment && $0.status == status })
         #expect(Set(captured.map(\.requestID)).count == 1)
     }
 
@@ -271,9 +271,9 @@ struct SourceFailureDiagnosticsTests {
         let transport = PersistentHTTP1Transport(label: "diagnostic")
         defer { transport.close() }
         let body = try await transport.open(url, headers: ["Authorization": "private-fixture"], limit: 4_096,
-                                            diagnosticContext: original, role: "HLSSegment")
+                                            diagnosticContext: original, role: .hlsSegment)
         let opened = events.snapshot().filter { $0.originalURL == url }
-        #expect(opened.map(\.phase) == ["response", "redirect", "response"])
+        #expect(opened.map(\.phase) == [.response, .redirect, .response])
         #expect(opened.map(\.status) == [302, 302, 200])
         #expect(opened.last?.url == target)
         let received = try await SourceNetworkDiagnostics.$context.withValue(replacement) {
@@ -285,8 +285,8 @@ struct SourceFailureDiagnosticsTests {
         #expect(try await body.next() == nil)
         body.abandon()
         let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == ["response", "redirect", "response", "completed"])
-        #expect(captured.allSatisfy { $0.context == original && $0.role == "HLSSegment" })
+        #expect(captured.map(\.phase) == [.response, .redirect, .response, .completed])
+        #expect(captured.allSatisfy { $0.context == original && $0.role == .hlsSegment })
         #expect(Set(captured.map(\.requestID)).count == 1)
         #expect(captured.last?.bytes == Int64(payload.count))
         #expect(captured.last?.url == target && captured.last?.urlErrorCode == nil)
@@ -310,7 +310,7 @@ struct SourceFailureDiagnosticsTests {
         let answer = try await transport.get(url, headers: [:], limit: 1_024)
         #expect(answer.response.statusCode == 403 && answer.body.isEmpty)
         let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == ["response", "completed"])
+        #expect(captured.map(\.phase) == [.response, .completed])
         #expect(captured.allSatisfy { $0.status == 403 && $0.urlErrorCode == nil && $0.context == nil })
         #expect(captured.last?.bytes == Int64(payload.count))
         #expect(Set(captured.map(\.requestID)).count == 1)
@@ -336,7 +336,7 @@ struct SourceFailureDiagnosticsTests {
             #expect(error.limit == 1_024)
         }
         let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == ["response", "completed"])
+        #expect(captured.map(\.phase) == [.response, .completed])
         #expect(captured.allSatisfy { $0.status == 200 })
         #expect(Set(captured.map(\.requestID)).count == 1)
         if chunked { #expect((captured.last?.bytes ?? 0) > 1_024) }
@@ -364,7 +364,7 @@ struct SourceFailureDiagnosticsTests {
             guard case .malformed = error else { throw error }
         }
         let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == ["response", "completed"])
+        #expect(captured.map(\.phase) == [.response, .completed])
         #expect(captured.allSatisfy { $0.status == 200 })
         #expect(captured.last?.bytes == Int64(payload.count))
         #expect(Set(captured.map(\.requestID)).count == 1)
@@ -386,16 +386,16 @@ struct SourceFailureDiagnosticsTests {
         let transport = PersistentHTTP1Transport(label: "diagnostic")
         defer { transport.close() }
         let body = try await transport.open(url, headers: [:], limit: 4_096,
-                                            diagnosticContext: original, role: "HLSSegment")
+                                            diagnosticContext: original, role: .hlsSegment)
         #expect(try await body.next() != nil)
         SourceNetworkDiagnostics.$context.withValue(replacement) { body.abandon() }
-        try await waitFor { events.snapshot().contains { $0.originalURL == url && $0.phase == "completed" } }
+        try await waitFor { events.snapshot().contains { $0.originalURL == url && $0.phase == .completed } }
         let next = try await transport.get(server.url("/next.ts"), headers: [:], limit: 4_096)
         #expect(next.body == payload)
         body.abandon()
         let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == ["response", "completed"])
-        #expect(captured.allSatisfy { $0.context == original && $0.role == "HLSSegment" })
+        #expect(captured.map(\.phase) == [.response, .completed])
+        #expect(captured.allSatisfy { $0.context == original && $0.role == .hlsSegment })
         #expect(captured.last?.urlErrorCode == NSURLErrorCancelled)
         #expect(captured.last?.bytes == Int64(payload.count))
         #expect(Set(captured.map(\.requestID)).count == 1)
@@ -440,13 +440,13 @@ struct SourceFailureDiagnosticsTests {
         }
         #expect(try result.get() == payload)
         let captured = events.snapshot().filter { $0.originalURL == url || $0.originalURL == segmentURL }
-        #expect(captured.filter { $0.phase == "response" }.count == 2)
-        #expect(captured.filter { $0.phase == "completed" }.count == 2)
+        #expect(captured.filter { $0.phase == .response }.count == 2)
+        #expect(captured.filter { $0.phase == .completed }.count == 2)
         #expect(captured.allSatisfy { $0.context == original && $0.status == 200 && $0.urlErrorCode == nil })
-        #expect(captured.filter { $0.originalURL == url }.allSatisfy { $0.role == "HLSPlaylist" })
-        #expect(captured.filter { $0.originalURL == segmentURL }.allSatisfy { $0.role == "HLSSegment" })
+        #expect(captured.filter { $0.originalURL == url }.allSatisfy { $0.role == .hlsPlaylist })
+        #expect(captured.filter { $0.originalURL == segmentURL }.allSatisfy { $0.role == .hlsSegment })
         #expect(Set(captured.map(\.requestID)).count == 2)
-        #expect(captured.first { $0.originalURL == segmentURL && $0.phase == "completed" }?.bytes == Int64(payload.count))
+        #expect(captured.first { $0.originalURL == segmentURL && $0.phase == .completed }?.bytes == Int64(payload.count))
         #expect(server.connectionCount == 1)
     }
 
@@ -470,7 +470,7 @@ struct SourceFailureDiagnosticsTests {
         let (_, response) = try await BoundedPlaylistFetch.data(for: URLRequest(url: url), session: session, limit: 1024)
         #expect((response as? HTTPURLResponse)?.statusCode == 403)
         let terminal = try #require(events.snapshot().first {
-            $0.originalURL == url && $0.phase == "completed" && $0.role == "HLSPlaylist"
+            $0.originalURL == url && $0.phase == .completed && $0.role == .hlsPlaylist
         })
         #expect(terminal.status == 403)
         #expect(terminal.urlErrorCode == nil)
@@ -496,12 +496,12 @@ struct SourceFailureDiagnosticsTests {
             reader.markClosed()
         }
         let response = try #require(events.snapshot().first {
-            $0.phase == "response" && $0.status == 403 && $0.originalURL == url && $0.role == "PersistentRead"
+            $0.phase == .response && $0.status == 403 && $0.originalURL == url && $0.role == .persistentRead
         })
         #expect(response.originalURL?.port == Int(server.port))
         #expect(response.url?.host == "127.0.0.1")
         #expect(response.urlErrorCode == nil)
-        #expect(response.role == "PersistentRead")
+        #expect(response.role == .persistentRead)
     }
 
     @MainActor
@@ -552,7 +552,7 @@ struct SourceFailureDiagnosticsTests {
     }
 
     @MainActor
-    @Test("Live initial connection failure keeps the URL error instead of generic live unavailable")
+    @Test("Live initial connection failure keeps liveSourceUnavailable and the original URL error")
     func liveConnectionFailure() async throws {
         let server = try #require(ScriptedOriginServer { _ in .init(status: 200, declaredLength: 0) })
         let url = URL(string: "http://127.0.0.1:\(server.port)/live/test.ts")!
@@ -565,9 +565,138 @@ struct SourceFailureDiagnosticsTests {
             _ = try await engine.load(url: url, options: options)
             Issue.record("Closed source must fail")
         } catch {
-            #expect(engine.errorInfo?.kind == .sourceOpenFailed)
+            #expect(engine.errorInfo?.kind == .liveSourceUnavailable)
             #expect(engine.errorInfo?.underlyingDomain == NSURLErrorDomain)
             #expect(engine.errorInfo?.underlyingCode == NSURLErrorCannotConnectToHost)
         }
     }
+    private final class RangedSource: URLProtocol, @unchecked Sendable {
+        override class func canInit(with request: URLRequest) -> Bool { true }
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+        override func startLoading() {
+            let range = (request.value(forHTTPHeaderField: "Range") ?? "bytes=0-")
+                .dropFirst(6).split(separator: "-", omittingEmptySubsequences: false)
+            let start = Int(range.first ?? "0") ?? 0
+            let end = min(16_383, range.count > 1 ? (Int(range[1]) ?? 16_383) : 16_383)
+            guard start <= end else {
+                client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+                return
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 206, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Range": "bytes \(start)-\(end)/16384", "Content-Length": "\(end - start + 1)"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data((start...end).map { UInt8($0 % 251) }))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        override func stopLoading() {}
+    }
+
+    @Test("AVIO reconnects keep the reader owner across real thread boundaries, including nil",
+          .timeLimit(.minutes(1)), arguments: [true, false])
+    func avioReconnectRetainsCapturedContext(attributed: Bool) async throws {
+        let owner = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let url = URL(string: "https://\(UUID().uuidString).invalid/video.bin")!
+        let events = CorrelationEvents()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { if $0.originalURL == url { events.add($0) } }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RangedSource.self]
+        let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }
+        // One request suppresses speculative tail prefetch; only the playback connection is exercised.
+        OriginRequestBudget.shared.setHostLimit(1, for: url)
+        defer { OriginRequestBudget.shared.setHostLimit(nil, for: url) }
+        let reader = SourceNetworkDiagnostics.$context.withValue(attributed ? owner : nil) {
+            AVIOReader(url: url, boundedInitialFetch: 4096, persistentRequestSession: session)
+        }
+        let result = try await withTaskCancellationHandler {
+            try await SourceNetworkDiagnostics.$context.withValue(replacement) {
+                try await ProbeTestJob {
+                    defer { reader.markClosed(); reader.close() }
+                    #expect(SourceNetworkDiagnostics.context == nil)
+                    try reader.open()
+                    var bytes = [UInt8](repeating: 0, count: 16)
+                    #expect(reader.read(into: &bytes, size: 16) == 16)
+                    #expect(bytes == (0..<16).map { UInt8($0 % 251) })
+                    #expect(reader.seek(offset: 8192, whence: SEEK_SET) == 8192)
+                    #expect(reader.read(into: &bytes, size: 16) == 16)
+                    #expect(bytes == (8192..<8208).map { UInt8($0 % 251) })
+                }.outcome()
+            }
+        } onCancel: { reader.markClosed(); session.invalidateAndCancel() }
+        try result.get()
+        try await waitFor { events.snapshot().filter { $0.phase == .completed }.count >= 2 }
+        let captured = events.snapshot()
+        let responses = captured.filter { $0.phase == .response }
+        #expect(responses.count == 2)
+        #expect(Set(responses.map(\.requestID)).count == 2)
+        #expect(captured.allSatisfy { $0.role == .persistentRead && $0.context == (attributed ? owner : nil) })
+    }
+
+    @MainActor
+    @Test("Session opens and fresh reopens retain their explicitly captured owner, including nil", arguments: [true, false])
+    func sessionReopensRetainContext(attributed: Bool) {
+        let owner = attributed ? SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID()) : nil
+        let ambient = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        SourceNetworkDiagnostics.$context.withValue(ambient) {
+            let session = HLSVideoEngine(url: URL(string: "https://example.invalid/video.mkv")!, diagnosticContext: owner)
+            #expect(session.openProfile.diagnosticContext == owner)
+            #expect(session.restartReopenProfile.diagnosticContext == owner)
+            let headers = RequestHeaderStore(["User-Agent": "test"])
+            let liveReopen = session.openProfile.withRequestHeaders(headers)
+            #expect(liveReopen.diagnosticContext == owner)
+            #expect(liveReopen.requestHeaders === headers)
+        }
+    }
+
+    @MainActor
+    @Test("Live startup keeps its public kind and original cause; VOD retains its own classification")
+    func liveStartupFailureContract() throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        for code in [NSURLErrorTimedOut, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost] {
+            let error = NSError(domain: "Wrapper", code: 1,
+                                userInfo: [NSUnderlyingErrorKey: NSError(domain: NSURLErrorDomain, code: code)])
+            engine.publishLoadFailure(error, isLiveStart: true)
+            #expect(engine.errorInfo?.kind == .liveSourceUnavailable)
+            #expect(engine.errorInfo?.underlyingDomain == NSURLErrorDomain)
+            #expect(engine.errorInfo?.underlyingCode == code)
+            engine.publishLoadFailure(error)
+            #expect(engine.errorInfo?.kind == .sourceOpenFailed)
+        }
+        for status in [401, 403, 404, 429, 503, 509] {
+            for error: any Error in [AVIOReaderError.httpStatus(status), HLSIngestError.playlistUnreachable(status: status)] {
+                engine.publishLoadFailure(error, isLiveStart: true)
+                #expect(engine.errorInfo?.kind == (AVIOReader.isRateLimitStatus(status) ? .sourceRateLimited : .sourceRefused))
+                #expect(engine.errorInfo?.underlyingCode == status)
+            }
+        }
+        for error: any Error in [URLError(.serverCertificateUntrusted), AVIOReaderError.transportSecurityFailed(code: NSURLErrorServerCertificateUntrusted)] {
+            engine.publishLoadFailure(error, isLiveStart: true)
+            #expect(engine.errorInfo?.kind == .sourceCertificateRejected)
+            #expect(engine.errorInfo?.underlyingDomain == NSURLErrorDomain)
+            #expect(engine.errorInfo?.underlyingCode == NSURLErrorServerCertificateUntrusted)
+        }
+        engine.publishLoadFailure(DemuxerError.openFailed(code: -5), isLiveStart: true)
+        #expect(engine.errorInfo?.kind == .liveSourceUnavailable)
+        #expect(engine.errorInfo?.underlyingCode == 0)
+        #expect(engine.errorInfo?.ffmpegErrorCode == -5)
+        engine.publishLoadFailure(HLSIngestError.playlistInvalid(reason: "no segments"), isLiveStart: true)
+        #expect(engine.errorInfo?.kind == .liveSourceUnavailable)
+        #expect(engine.errorInfo?.hlsDiagnosticReason == .noSegments)
+    }
+
+    @Test("Diagnostic roles and phases preserve raw tokens and accept future values")
+    func extensibleDiagnosticTokens() throws {
+        let role = SourceNetworkDiagnostics.Role(rawValue: "FutureReader")
+        let phase = SourceNetworkDiagnostics.Phase(rawValue: "future_phase")
+        #expect(try JSONDecoder().decode(SourceNetworkDiagnostics.Role.self, from: JSONEncoder().encode(role)) == role)
+        #expect(try JSONDecoder().decode(SourceNetworkDiagnostics.Phase.self, from: JSONEncoder().encode(phase)) == phase)
+        #expect(SourceNetworkDiagnostics.Role.persistentRead.rawValue == "PersistentRead")
+        #expect(SourceNetworkDiagnostics.Phase.bodyLimitExceeded.rawValue == "body_limit_exceeded")
+        #expect(SourceNetworkDiagnostics.Phase.abandoned.rawValue == "abandoned")
+    }
+
 }

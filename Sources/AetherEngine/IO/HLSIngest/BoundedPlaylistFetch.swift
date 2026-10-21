@@ -14,7 +14,7 @@ enum BoundedPlaylistFetch {
         -> (Data, URLResponse)
     {
         do {
-            return try await BoundedFetch.data(for: request, session: session, limit: limit, role: "HLSPlaylist")
+            return try await BoundedFetch.data(for: request, session: session, limit: limit, role: .hlsPlaylist)
         } catch let error as BoundedFetch.Exceeded {
             throw HLSIngestError.playlistInvalid(reason: "playlist exceeds \(error.limit) bytes")
         }
@@ -54,7 +54,7 @@ enum BoundedFetch {
 
     /// The body and response of `request`. A non-2xx answer comes back with an empty body, since every
     /// caller decides on the status alone. Throws `Exceeded` for a body over `limit`.
-    static func data(for request: URLRequest, session: URLSession, limit: Int, role: String = "BoundedBody") async throws
+    static func data(for request: URLRequest, session: URLSession, limit: Int, role: SourceNetworkDiagnostics.Role = .boundedBody) async throws
         -> (Data, URLResponse)
     {
         let delegate = BoundedBodyDelegate(limit: limit, role: role, context: SourceNetworkDiagnostics.context(for: request))
@@ -108,7 +108,7 @@ private final class BoundedBodyDelegate: EngineTLS.RedirectScrubbingDelegate, UR
     private var onOutcome: ((Outcome) -> Void)?
     private var landed: Outcome?
 
-    init(limit: Int, role: String, context: SourceNetworkDiagnostics.Context?) {
+    init(limit: Int, role: SourceNetworkDiagnostics.Role, context: SourceNetworkDiagnostics.Context?) {
         self.limit = limit
         trace = .init(role: role, context: context)
         super.init()
@@ -178,7 +178,7 @@ private final class BoundedBodyDelegate: EngineTLS.RedirectScrubbingDelegate, UR
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         // Refusal/body limits deliberately cancel the task; do not report that as user cancellation.
         trace.completed(task: task, error: verdict == nil ? error : nil,
-                        phase: verdict == .exceeded ? "body_limit_exceeded" : "completed")
+                        phase: verdict == .exceeded ? .bodyLimitExceeded : .completed)
         switch verdict {
         case .refused?:
             if let response { deliver(.refused(response)) } else { deliver(.failed(URLError(.badServerResponse))) }

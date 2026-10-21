@@ -1,10 +1,21 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-21. Integration base: upstream 7.44.0
-(`e5ea8dac56a6962d7f6793fc80b7c84caa61b7af`). The source-failure diagnostics
+Updated: 2026-10-22. Integration base: upstream 7.45.0
+(`52802afaaf035a7f729bba1043b640ad4d9ebb3e`). The source-failure diagnostics
 from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
 
 ## Current differences
+
+- PR #818 review corrections retain `liveSourceUnavailable` on failed live starts,
+  with original URL domain/code. HTTP and TLS refusals keep their specific kinds.
+- Source ownership is captured before detached opens and retained by AVIO delegates,
+  fresh session readers, reconnects and prefetch. Event fields are immutable, with
+  extensible `Role`/`Phase` values preserving the existing raw tokens.
+- A source-literal regression detects drift in finite HLS reason mappings. The
+  historical `playlistUnreachable` name also covers segment and AES key refusals.
+- The fork retains its additional held HTTP/1 body status, partial-byte, redirect
+  and drain diagnostics. Their existing terminal event semantics are preserved.
+  Upstream #809 and #819 supersede the old local test-isolation workarounds.
 
 - The length-less read-loss fixture waits for a successful open before cutting the
   body, so the regression measures a mid-read failure rather than an initial refusal.
@@ -88,7 +99,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.42.0 integration.
+and is included in the current 7.45.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

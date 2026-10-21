@@ -61,18 +61,31 @@ struct StreamingBufferBoundTests {
     }
 
     @Test("a dropped connection is EIO without a cause of ours", .timeLimit(.minutes(1)))
-    func droppedConnectionHasNoCause() throws {
+    func droppedConnectionHasNoCause() async throws {
         let total: Int64 = 8 * 1024 * 1024
         let maybe = ThrottledOriginServer(totalSize: total, throttleUs: 0,
-                                          respond: { _, _, _ in .serveThenDrop(afterBytes: 1024 * 1024) })
+                                          respond: { _, _, _ in .serveThenGoSilent(afterBytes: 1024 * 1024) })
         let server = try #require(maybe)
         defer { server.stop() }
         let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/archive.ts")!,
                                 sequentialOnly: true)
-        defer { reader.markClosed(); reader.close() }
-        try reader.open()
-
-        let result = drain(reader)
+        let result = try await withTaskCancellationHandler {
+            try await ProbeTestJob {
+                defer { reader.markClosed(); reader.close() }
+                try reader.open()
+                var firstByte: UInt8 = 0
+                let firstRead = withUnsafeMutablePointer(to: &firstByte) { reader.read(into: $0, size: 1) }
+                try #require(firstRead == 1)
+                // Drop only after open succeeds: an earlier loss legitimately fails open with
+                // its URL error instead of exercising the established stream's EIO contract.
+                server.stop()
+                return drain(reader)
+            }.outcome().get()
+        } onCancel: {
+            reader.markClosed()
+            server.stop()
+        }
+        #expect(result.read < total)
         #expect(result.last == FFmpegErr.eio)
         #expect(reader.lastReadFailure == nil, "a lost connection is the network's, not the origin's flow control")
     }

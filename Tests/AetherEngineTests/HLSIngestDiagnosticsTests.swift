@@ -47,6 +47,7 @@ final class HLSIngestDiagnosticsTests: XCTestCase {
             ("playlist exceeds 10 bytes", .playlistSizeLimitExceeded),
             ("playlist line exceeds 10 bytes", .playlistLineLimitExceeded),
             ("segment exceeds 10 bytes", .bodySizeLimitExceeded),
+            ("segment body over its limit", .bodySizeLimitExceeded),
             ("body exceeds 10 bytes", .bodySizeLimitExceeded),
             ("non-UTF8 playlist", .invalidPlaylistEncoding),
             ("playlist is not bounded UTF-8", .invalidPlaylistEncoding),
@@ -117,4 +118,43 @@ final class HLSIngestDiagnosticsTests: XCTestCase {
         }
         XCTAssertNil(HLSIngestDiagnosticReason.preserved(in: wrapped), "Traversal must have a fixed bound")
     }
+    func testEverySourceReasonLiteralHasASpecificDiagnosticMapping() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Sources")
+        let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+        let pattern = try NSRegularExpression(pattern: #"HLSIngestError\.(playlistInvalid|segmentDecryptFailed)\(reason:\s*"((?:\\.|[^"\\])*)""#)
+        let interpolation = try NSRegularExpression(pattern: #"\\\([^)]*\)"#)
+        var count = 0
+        for case let file as URL in enumerator where file.pathExtension == "swift" {
+            let source = try String(contentsOf: file, encoding: .utf8)
+            let ns = source as NSString
+            for match in pattern.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
+                count += 1
+                let kind = ns.substring(with: match.range(at: 1))
+                let literal = ns.substring(with: match.range(at: 2))
+                let reasons: [String]
+                if literal == #"\(tag) out of range"# {
+                    // Expand the parser's dynamic tag from its actual call sites, not a duplicate list.
+                    let tags = try NSRegularExpression(pattern: #"tag:\s*"([^"]+)""#)
+                    reasons = tags.matches(in: source, range: NSRange(location: 0, length: ns.length))
+                        .map { ns.substring(with: $0.range(at: 1)) + " out of range" }
+                    XCTAssertFalse(reasons.isEmpty)
+                } else {
+                    reasons = [interpolation.stringByReplacingMatches(in: literal,
+                        range: NSRange(location: 0, length: (literal as NSString).length), withTemplate: "1")]
+                }
+                for reason in reasons {
+                    let error: HLSIngestError = kind == "playlistInvalid"
+                        ? .playlistInvalid(reason: reason) : .segmentDecryptFailed(reason: reason)
+                    XCTAssertNotEqual(error.diagnosticReason, .playlistInvalid, "Unmapped reason at \(file.lastPathComponent): \(literal)")
+                    if error.diagnosticReason == .decryptionFailed {
+                        // This is a real decrypt failure, whereas an unknown key error would hit the same fallback.
+                        XCTAssertEqual(reason, "AES-128-CBC failed", "Unmapped decrypt reason at \(file.lastPathComponent): \(literal)")
+                    }
+                }
+            }
+        }
+        XCTAssertGreaterThan(count, 0, "Source scan must exercise real throw sites")
+    }
+
 }

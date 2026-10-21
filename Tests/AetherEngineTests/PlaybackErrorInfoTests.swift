@@ -48,7 +48,7 @@ struct PlaybackErrorInfoTests {
     @Test("A live HLS join retains the actual connection error", .timeLimit(.minutes(1)))
     func unreachableLiveJoinIsUnavailable() async throws {
         let observed = try await failedLiveIngestLoad(try #require(URL(string: "http://127.0.0.1:1/live/1.m3u8")))
-        #expect(observed?.kind == .sourceOpenFailed)
+        #expect(observed?.kind == .liveSourceUnavailable)
         #expect(observed?.underlyingDomain == NSURLErrorDomain)
         #expect(observed?.underlyingCode == NSURLErrorCannotConnectToHost)
     }

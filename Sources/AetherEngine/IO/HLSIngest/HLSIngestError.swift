@@ -49,6 +49,8 @@ public enum HLSIngestDiagnosticReason: String, Sendable, CaseIterable {
 /// Terminal errors from the HLS ingest. Hosts choose recovery or fallback from the failure kind;
 /// a malformed playlist or a transport failure does not establish a format incompatibility.
 public enum HLSIngestError: Error, Equatable, CustomStringConvertible, LocalizedError, CustomNSError {
+    /// An HLS request was refused: the status may belong to a playlist, segment or AES key.
+    /// The historical case name and NSError code are retained for source compatibility.
     case playlistUnreachable(status: Int)
     case playlistInvalid(reason: String)
     /// SAMPLE-AES / SAMPLE-AES-CTR, or AES-128 tag with no URI. Plain AES-128 clear-key is handled by `HLSSegmentDecryptor`.
@@ -115,11 +117,11 @@ public enum HLSIngestError: Error, Equatable, CustomStringConvertible, Localized
             case "media sequence out of range": return .invalidMediaSequence
             case "TARGETDURATION out of range": return .invalidTargetDuration
             case "EXTINF out of range", "segment duration must be positive": return .invalidSegmentDuration
-            case "non-UTF8 playlist", "playlist is not bounded UTF-8": return .invalidPlaylistEncoding
+            case "non-UTF8 playlist", "playlist is not bounded UTF-8", "rendition payload is not UTF-8": return .invalidPlaylistEncoding
             default:
                 if reason.hasPrefix("playlist line exceeds ") { return .playlistLineLimitExceeded }
                 if reason.hasPrefix("playlist exceeds ") { return .playlistSizeLimitExceeded }
-                if reason.hasPrefix("segment exceeds ") || reason.hasPrefix("body exceeds ") {
+                if reason == "segment body over its limit" || reason.hasPrefix("segment exceeds ") || reason.hasPrefix("body exceeds ") {
                     return .bodySizeLimitExceeded
                 }
                 if reason.hasPrefix("program duration exceeds ") { return .durationLimitExceeded }

@@ -134,12 +134,12 @@ enum HLSCarriageProbe {
     ) async throws -> MPEGTransportStreamCodecProbe.Verdict {
         var request = SourceNetworkDiagnostics.request(makeRequest(url, httpHeaders: httpHeaders), context: diagnosticContext)
         request.setValue("bytes=0-\(maximumSegmentHeadBytes - 1)", forHTTPHeaderField: "Range")
-        let trace = SourceNetworkDiagnostics.Trace(role: "HLSSegment", context: SourceNetworkDiagnostics.context(for: request))
+        let trace = SourceNetworkDiagnostics.Trace(role: .hlsSegment, context: SourceNetworkDiagnostics.context(for: request))
         var task: URLSessionTask?
         var terminalError: Error?
         defer {
             if let task { trace.completed(task: task, error: terminalError) }
-            else { trace.record("completed", originalURL: url, url: url, error: terminalError) }
+            else { trace.record(.completed, originalURL: url, url: url, error: terminalError) }
         }
         do {
             let (bytes, response) = try await session.bytes(for: request)

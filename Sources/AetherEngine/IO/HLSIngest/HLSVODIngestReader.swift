@@ -574,7 +574,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         let body: PersistentHTTP1Transport.Body
         do {
             body = try await transport.open(url, headers: scopedHeaders(url), limit: limit,
-                                            diagnosticContext: diagnosticContext, role: "HLSSegment")
+                                             diagnosticContext: diagnosticContext, role: .hlsSegment)
         } catch is BoundedFetch.Exceeded {
             throw HLSIngestError.playlistInvalid(reason: "body exceeds \(limit) bytes")
         }
@@ -701,7 +701,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         if let transport {
             do {
                 let answer = try await transport.get(url, headers: scopedHeaders(url), limit: Self.maximumPlaylistBytes,
-                                                     diagnosticContext: diagnosticContext, role: "HLSPlaylist")
+                                                     diagnosticContext: diagnosticContext, role: .hlsPlaylist)
                 (data, response) = (answer.body, answer.response)
             } catch let error as BoundedFetch.Exceeded {
                 throw HLSIngestError.playlistInvalid(reason: "playlist exceeds \(error.limit) bytes")
@@ -721,7 +721,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
     }
 
     /// A segment or a key body, cut off at `limit` while it arrives (audit NET-112).
-    private func fetch(_ url: URL, limit: Int, role: String = "HLSSegment") async throws -> Data {
+    private func fetch(_ url: URL, limit: Int, role: SourceNetworkDiagnostics.Role = .hlsSegment) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
@@ -795,7 +795,7 @@ final class HLSVODIngestReader: TimeSeekableIOReader, @unchecked Sendable {
         if let cached = keyCacheLock.withLock({ keyCache[keyURL.absoluteString] }) {
             key = cached
         } else {
-            let fetched = try await fetch(keyURL, limit: BoundedFetch.keyLimit, role: "HLSKey")
+            let fetched = try await fetch(keyURL, limit: BoundedFetch.keyLimit, role: .hlsKey)
             guard fetched.count == kCCKeySizeAES128 else {
                 throw HLSIngestError.segmentDecryptFailed(reason: "key length is not 16 bytes")
             }

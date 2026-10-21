@@ -55,7 +55,7 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
     /// `BoundedFetch.Exceeded` for a 2xx body over `limit`.
     func get(_ url: URL, headers: [String: String], limit: Int,
              diagnosticContext: SourceNetworkDiagnostics.Context? = nil,
-             role: String = "BoundedBody") async throws -> Response {
+             role: SourceNetworkDiagnostics.Role = .boundedBody) async throws -> Response {
         let body = try await open(url, headers: headers, limit: limit,
                                   diagnosticContext: diagnosticContext, role: role)
         var data = Data()
@@ -71,7 +71,7 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
     /// here and follows the body through its actual completion, including background drains.
     func open(_ url: URL, headers: [String: String], limit: Int,
               diagnosticContext: SourceNetworkDiagnostics.Context? = nil,
-              role: String = "BoundedBody") async throws -> Body {
+              role: SourceNetworkDiagnostics.Role = .boundedBody) async throws -> Body {
         let trace = SourceNetworkDiagnostics.Trace(role: role, context: diagnosticContext)
         var target = url
         var hops = 0
@@ -85,7 +85,7 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
                     extraHeaders: headers, originalURL: url, redirectURL: target)
                 let (connection, head, reused) = try await request(target, headers: hopHeaders)
                 status = head.status
-                trace.record("response", originalURL: url, url: target, status: head.status)
+                trace.record(.response, originalURL: url, url: target, status: head.status)
                 let success = (200..<300).contains(head.status)
                 let location = HeldSourceConnection.redirectLocation(head)
                 guard let response = HeldSourceConnection.makeResponse(head, url: target) else {
@@ -108,12 +108,12 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
                         guard let next = URL(string: location, relativeTo: target)?.absoluteURL else {
                             throw PersistentHTTP1Connection.ConnectionError.malformed("unresolvable Location: \(location)")
                         }
-                        trace.record("redirect", originalURL: url, url: next, status: head.status)
+                        trace.record(.redirect, originalURL: url, url: next, status: head.status)
                         hops += 1
                         target = next
                         continue
                     }
-                    trace.record("completed", originalURL: url, url: target,
+                    trace.record(.completed, originalURL: url, url: target,
                                  status: head.status, bytes: received)
                     return Body(finished: response)
                 }
@@ -127,7 +127,7 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
                     framing: framing, limit: limit, reused: reused, trace: trace, originalURL: url)
             }
         } catch {
-            trace.record("completed", originalURL: url, url: target,
+            trace.record(.completed, originalURL: url, url: target,
                          status: status, bytes: received, error: error)
             throw error
         }
@@ -485,7 +485,7 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
             }
             guard let terminal else { return }
             if let trace, let originalURL {
-                trace.record("completed", originalURL: originalURL, url: response.url ?? originalURL,
+                trace.record(.completed, originalURL: originalURL, url: response.url ?? originalURL,
                              status: response.statusCode, bytes: terminal.bytes,
                              error: error ?? (terminal.abandoned ? URLError(.cancelled) : nil))
             }
@@ -613,7 +613,10 @@ final class PersistentHTTP1Connection: @unchecked Sendable {
 
     /// The next piece of a body under `framing`, nil at its end, plus the framing after it. No
     /// cancellation handler: the caller decides whether an abandoned body is drained or closed.
-    func readChunk(_ framing: Framing, progress: () -> String) async throws -> (Data?, Framing) {
+    func readChunk(
+        _ framing: Framing, progress: () -> String,
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws -> (Data?, Framing) {
         guard let task = stateLock.withLock({ retired ? nil : task }) else { throw CancellationError() }
         while true {
             switch framing {
@@ -772,7 +775,10 @@ final class PersistentHTTP1Connection: @unchecked Sendable {
     }
 
     /// Bytes left over from the head read first, then the socket. nil is EOF.
-    private func nextBytes(_ task: URLSessionStreamTask, upTo limit: Int, progress: () -> String) async throws -> Data? {
+    private func nextBytes(
+        _ task: URLSessionStreamTask, upTo limit: Int, progress: () -> String,
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws -> Data? {
         let buffered = stateLock.withLock { () -> Data in
             let slice = pending.prefix(limit)
             pending.removeFirst(slice.count)

@@ -551,8 +551,40 @@ struct SourceFailureDiagnosticsTests {
         }
     }
 
+    // AE#818 review: a first connection that ends without a body or a refusal (an IPTV or Jellyfin
+    // tuner still spinning up resets it) is the reconnect ladder's to ride, not the open's to fail. Its
+    // URL error is recorded for a later give-up and forgotten once the reconnect delivers. The reset
+    // comes after the header, because URLSession silently retries a GET that dies before one.
+    @Test("A live open whose first connection drops before any data reconnects instead of failing",
+          .timeLimit(.minutes(1)))
+    func liveOpenRidesFirstConnectionLoss() async throws {
+        let maybeServer = ThrottledOriginServer(totalSize: 8 * 1024 * 1024, throttleUs: 0,
+                                                respond: { index, _, _ in index == 0 ? .serveThenDrop(afterBytes: 0) : .serve206 })
+        let server = try #require(maybeServer)
+        defer { server.stop() }
+        let reader = AVIOReader(url: URL(string: "http://127.0.0.1:\(server.port)/live/channel.ts")!, isLive: true)
+        let (count, recorded) = try await withTaskCancellationHandler {
+            try await ProbeTestJob {
+                defer { reader.markClosed(); reader.close() }
+                try reader.open()
+                var prefix = Data(count: 16)
+                let count = prefix.withUnsafeMutableBytes {
+                    reader.read(into: $0.baseAddress!.assumingMemoryBound(to: UInt8.self), size: 16)
+                }
+                return (count, reader.lastTransportFailureCode)
+            }.outcome().get()
+        } onCancel: {
+            reader.markClosed()
+            server.stop()
+        }
+        #expect(count > 0)
+        #expect(server.requestLog.count >= 2)
+        #expect(recorded == nil, "a delivered reconnect leaves no recorded cause behind")
+    }
+
     @MainActor
-    @Test("Live initial connection failure keeps liveSourceUnavailable and the original URL error")
+    @Test("Live initial connection failure keeps liveSourceUnavailable and the original URL error",
+          .timeLimit(.minutes(2)))
     func liveConnectionFailure() async throws {
         let server = try #require(ScriptedOriginServer { _ in .init(status: 200, declaredLength: 0) })
         let url = URL(string: "http://127.0.0.1:\(server.port)/live/test.ts")!

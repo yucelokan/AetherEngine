@@ -4748,10 +4748,12 @@ public final class AetherEngine: ObservableObject {
         // Live fail-fast: a failed probe means the AVIOReader burned its full reconnect budget.
         // Proceeding would dispatch on codec NONE and grind another ~30 s before erroring.
         if options.isLive, !probeOpened {
-            // A failed initial probe is not a runtime outage. Keep the transport,
-            // HTTP or demux cause so hosts can choose recovery without guessing.
+            // A failed initial probe is not a runtime outage. Keep the HTTP or demux cause so hosts
+            // can choose recovery without guessing. A live open that reaches nothing keeps
+            // liveSourceUnavailable: the reader rode its transport failures out on the reconnect
+            // ladder, and the URL error its last connection ended with is the cause it gives up with.
             let failure = probeFailure ?? DemuxerError.openFailed(code: -5)
-            publishLoadFailure(failure, isLiveStart: true)
+            publishLoadFailure(failure, isLiveStart: true, transportFailureCode: probe.openTransportFailureCode)
             throw failure
         }
 

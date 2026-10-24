@@ -1250,7 +1250,9 @@ as well.
 ## Diagnostics
 
 A failed live start keeps `PlaybackErrorKind.liveSourceUnavailable`, including its
-original URL error in `underlyingDomain` / `underlyingCode`. HTTP refusals remain
+original URL error in `underlyingDomain` / `underlyingCode`. That cause is diagnostic
+data only: a transport failure at open is still ridden out by the reconnect ladder,
+and the URL error is attached when the start finally gives up. HTTP refusals remain
 `sourceRefused` / `sourceRateLimited`, and TLS trust failures remain
 `sourceCertificateRejected`. Preserving a cause does not reclassify a dead live
 channel as a VOD `sourceOpenFailed`. `HLSIngestError.playlistUnreachable(status:)`

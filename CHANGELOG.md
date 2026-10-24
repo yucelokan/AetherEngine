@@ -14,14 +14,15 @@ the public-API contract.
 
 - **Source failures keep their cause and request ownership.** Initial live probes preserve HTTP,
   URL and TLS failures without changing the live-start `liveSourceUnavailable` kind (HTTP and
-  certificate classifications stay specific). HLS and demux errors retain their existing NSError domains/case codes while
+  certificate classifications stay specific). A transport failure at open (a reset or a timeout from
+  an origin still spinning up) is still ridden out by the reconnect ladder; its URL code is recorded
+  and attached to `liveSourceUnavailable` as `underlyingDomain` / `underlyingCode` only when a live
+  start finally gives up. HLS and demux errors retain their existing NSError domains/case codes while
   exposing bounded diagnostic reasons and the original FFmpeg code separately. Optional
   `SourceNetworkDiagnostics` events carry a captured playback/attempt context across redirects and
   internal reloads and AVIO thread crossings, including streamed held HTTP/1 bodies. Immutable
   events use extensible string-backed roles and phases. Refused AES key requests use the historical
-  `playlistUnreachable(status:)` case to preserve their HTTP status. Retiring a failed ranged connection clears
-  its transport error so a healthy forward-only replacement can open; replacement failures still
-  propagate. The observer does not alter request policy and requires hosts to redact source URLs.
+  `playlistUnreachable(status:)` case to preserve their HTTP status. The observer does not alter request policy and requires hosts to redact source URLs.
 
 ## [7.47.0] - 2026-10-23
 

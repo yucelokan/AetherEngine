@@ -181,8 +181,10 @@ extension AetherEngine {
     /// would have that player metered by the same origin. Anything the reader did not type keeps the
     /// historical `sourceOpenFailed` with whatever was underneath. A failed live start keeps
     /// `liveSourceUnavailable`; preserving its cause must not change the host's recovery contract.
+    /// `transportFailureCode` is the URL error the reader last recorded before the start gave up; it
+    /// names the cause of a live start the error itself (an FFmpeg open failure) cannot.
     @MainActor
-    func publishLoadFailure(_ error: Error, isLiveStart: Bool = false) {
+    func publishLoadFailure(_ error: Error, isLiveStart: Bool = false, transportFailureCode: Int? = nil) {
         if let ingest = error as? HLSIngestError {
             switch ingest {
             case .playlistUnreachable(let status) where status > 0:
@@ -222,7 +224,7 @@ extension AetherEngine {
             return
         }
         if isLiveStart {
-            if let code = SourceNetworkDiagnostics.urlErrorCode(error) {
+            if let code = SourceNetworkDiagnostics.urlErrorCode(error) ?? transportFailureCode {
                 publishError(PlaybackErrorInfo(kind: .liveSourceUnavailable, message: "Live source unavailable",
                                                underlyingDomain: NSURLErrorDomain, underlyingCode: code))
             } else {

@@ -574,6 +574,12 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
     /// self-signed origin is indistinguishable from a corrupt file. Guarded by `streamLock`.
     private var transportSecurityCode = 0
     private var streamURLFailureCode: Int?
+    /// AE#818: the URL error (not our own cancel) a connection of this reader last ended with, since
+    /// the last delivery. Diagnostic data only, never a reason to fail: the open and the read loop
+    /// still ride transport failures out, and the caller that gives up attaches it as the cause.
+    /// Guarded by `transportFailureLock`, which takes no other lock.
+    private var recordedTransportFailure: Int?
+    private let transportFailureLock = NSLock()
 
     // MARK: - Persistent Mode (single forward-streaming connection, playback path)
 
@@ -866,6 +872,26 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
 
     /// Audit DMX-107: the typed cause of the read error the streaming path reports, nil while the
     /// source is healthy and for a plain transport loss (which has no cause of ours to name).
+    /// The URL error code the reader's last failed connection ended with, nil once data arrived.
+    var lastTransportFailureCode: Int? {
+        transportFailureLock.lock()
+        defer { transportFailureLock.unlock() }
+        return recordedTransportFailure
+    }
+
+    private func recordTransportFailure(_ error: Error?) {
+        guard let code = SourceNetworkDiagnostics.urlErrorCode(error), code != NSURLErrorCancelled else { return }
+        transportFailureLock.lock()
+        recordedTransportFailure = code
+        transportFailureLock.unlock()
+    }
+
+    private func clearRecordedTransportFailure() {
+        transportFailureLock.lock()
+        recordedTransportFailure = nil
+        transportFailureLock.unlock()
+    }
+
     var lastReadFailure: AVIOReaderError? {
         streamLock.lock()
         defer { streamLock.unlock() }
@@ -1684,11 +1710,13 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             close()
             throw AVIOReaderError.transportSecurityFailed(code: tlsCode)
         }
-        if let code = streamCode ?? persistentCode, code != NSURLErrorCancelled, status == 0 {
+        // A trust failure cannot be fixed by reconnecting. Any other transport failure (a reset or
+        // a timeout while a tuner spins up) is left to the reconnect ladder, as before; its code is
+        // only recorded (`lastTransportFailureCode`) for whoever finally gives up.
+        if let code = streamCode ?? persistentCode, (-1206 ... -1200).contains(code), status == 0 {
             markClosed()
             close()
-            if (-1206 ... -1200).contains(code) { throw AVIOReaderError.transportSecurityFailed(code: code) }
-            throw URLError(URLError.Code(rawValue: code))
+            throw AVIOReaderError.transportSecurityFailed(code: code)
         }
         guard status != 0 else { return }
         EngineLog.emit(
@@ -3718,6 +3746,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         var firstDataMs: Double? = nil
         if !connFirstDataSeen {
             connFirstDataSeen = true
+            clearRecordedTransportFailure()
             firstDataMs = Double(DispatchTime.now().uptimeNanoseconds - connStartedAt.uptimeNanoseconds) / 1_000_000
             // #281 retest: the price of one round trip against this origin, which is what bounds
             // how long a read may wait for bytes that are already on the wire.
@@ -3990,6 +4019,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
         let isCurrentGen = (generation == connGeneration)
         if isCurrentGen {
             connURLFailureCode = SourceNetworkDiagnostics.urlErrorCode(error)
+            recordTransportFailure(error)
             connEnded = true
             // #220: the refill below keys off there being no live connection, so the finished
             // task must not stay installed.
@@ -4093,7 +4123,9 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
             // Owned bytes: the chunk is retained until it is consumed, and a delivery that still
             // references the transport's dispatch_data would pin its buffer for that long.
+            let firstDelivery = self.streamBuffer.isEmpty && self.streamBytesRead == 0
             self.streamBuffer.append(data.withUnsafeBytes { Data($0) })
+            if firstDelivery { self.clearRecordedTransportFailure() }
             self.streamPeakBytes = max(self.streamPeakBytes, self.streamBuffer.count)
             var toCancel: URLSessionDataTask?
             if self.streamBuffer.count > self.streamHardCap {
@@ -4132,6 +4164,7 @@ final class AVIOReader: AVIOProvider, @unchecked Sendable {
             }
             self.streamLock.lock()
             self.streamURLFailureCode = SourceNetworkDiagnostics.urlErrorCode(error)
+            self.recordTransportFailure(error)
             if error != nil, !self.isClosed { self.streamFailed = true }
             self.streamEnded = true
             self.streamLock.unlock()

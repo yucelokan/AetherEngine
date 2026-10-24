@@ -267,6 +267,10 @@ public final class Demuxer: @unchecked Sendable {
     /// own (never `accessLock`, which `av_read_frame` holds for a whole network read) makes that
     /// load a retained snapshot instead of a race.
     private let providerLock = NSLock()
+    /// AE#818: the URL error the source reader last recorded when the open gave up. Diagnostic data
+    /// for a live start's give-up to name as its cause; nil when the open succeeded, failed for
+    /// another reason, or the source is not an HTTP reader.
+    private(set) var openTransportFailureCode: Int?
     private var _avioProvider: AVIOProvider?
     private var avioProvider: AVIOProvider? {
         get {
@@ -849,6 +853,7 @@ public final class Demuxer: @unchecked Sendable {
         do {
             try provider.open()
         } catch {
+            openTransportFailureCode = (provider as? AVIOReader)?.lastTransportFailureCode
             abandonProvider(provider)
             throw error
         }
@@ -928,6 +933,7 @@ public final class Demuxer: @unchecked Sendable {
         av_dict_free(&opts)
         guard ret == 0 else {
             formatContext = nil
+            openTransportFailureCode = (avioProvider as? AVIOReader)?.lastTransportFailureCode
             avioProvider?.close()
             avioProvider = nil
             throw DemuxerError.openFailed(code: ret)

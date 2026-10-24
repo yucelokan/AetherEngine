@@ -17,9 +17,6 @@ from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
   and drain diagnostics. Their existing terminal event semantics are preserved.
   Upstream #809 and #819 supersede the old local test-isolation workarounds.
 
-- The length-less read-loss fixture waits for a successful open before cutting the
-  body, so the regression measures a mid-read failure rather than an initial refusal.
-
 - HTTP scheme dispatch is case insensitive.
 - HLS ingest preserves terminal transport errors, segment retry failures and key HTTP
   refusals. Unsupported HLS formats and invalid/decryption failures have separate
@@ -28,10 +25,10 @@ from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
   body-limit termination. Intentional refusal cancellation is not a transport error.
 - Failed initial live probes preserve their original transport, HTTP or demux
   failure through publication and throwing. Runtime source-loss behavior is unchanged.
-- Initial empty persistent/streaming responses retain URL error codes before waking
-  the opening thread; a live HTTP refusal remains a typed HTTP status.
-- Retiring a ranged connection clears its transport failure before a streaming
-  replacement is judged; the replacement still reports its own failures.
+- A transport failure at open (reset, timeout) is not a reason to fail the open: the open
+  and the read loop still ride it out on the reconnect ladder, and the reader only records
+  the last URL error. A failed live start attaches that record to `liveSourceUnavailable`
+  when it gives up. Only a TLS trust failure fails the open (PR #818 second review).
 - Demux NSError codes retain the historical open/stream-information/read case
   values. The original negative FFmpeg result is separate metadata, also exposed
   as optional `PlaybackErrorInfo.ffmpegErrorCode`; error messages are unchanged.

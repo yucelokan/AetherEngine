@@ -236,7 +236,7 @@ public final class HLSLiveIngestReader: IOReader, LiveIngestSourceInfo, @uncheck
     func makeFreshMainReader() -> HLSLiveIngestReader? {
         guard role == .mainVideo else { return nil }
         let fresh = HLSLiveIngestReader(playlistURL: playlistURL, httpHeaders: httpHeaders, role: .mainVideo,
-                                       diagnosticContext: diagnosticContext)
+                                        diagnosticContext: diagnosticContext)
         fresh.setJoinCushion(joinCushionSeconds)
         return fresh
     }

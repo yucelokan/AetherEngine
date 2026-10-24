@@ -67,69 +67,80 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
 
     /// GET `url` and return as soon as the response head is in. A 2xx body is read through the
     /// returned `Body`, which holds the origin until it ends or is abandoned; every other answer has
-    /// been read to its end already and its `Body` is empty. The trace captures request ownership
-    /// here and follows the body through its actual completion, including background drains.
+    /// been read to its end already and its `Body` is empty.
     func open(_ url: URL, headers: [String: String], limit: Int,
               diagnosticContext: SourceNetworkDiagnostics.Context? = nil,
               role: SourceNetworkDiagnostics.Role = .boundedBody) async throws -> Body {
         let trace = SourceNetworkDiagnostics.Trace(role: role, context: diagnosticContext)
+        let hop = OpenHop(url: url)
+        do {
+            return try await open(url, headers: headers, limit: limit, trace: trace, hop: hop)
+        } catch {
+            // The hop that failed, with the status its head carried: a failure after a redirect or
+            // after the head arrived (an oversized or malformed answer) names what was answered.
+            trace.record(error is BoundedFetch.Exceeded ? .bodyLimitExceeded : .completed,
+                         originalURL: url, url: hop.url, status: hop.status, error: error)
+            throw error
+        }
+    }
+
+    /// The request an open is on, for the terminal event of an open that fails. Task-confined.
+    private final class OpenHop {
+        var url: URL
+        var status: Int?
+        init(url: URL) { self.url = url }
+    }
+
+    private func open(_ url: URL, headers: [String: String], limit: Int,
+                      trace: SourceNetworkDiagnostics.Trace, hop: OpenHop) async throws -> Body {
         var target = url
         var hops = 0
-        var status: Int?
-        var received: Int64 = 0
-        do {
-            while true {
-                status = nil
-                received = 0
-                let hopHeaders = RedirectHeaderPolicy.headersToReplay(
-                    extraHeaders: headers, originalURL: url, redirectURL: target)
-                let (connection, head, reused) = try await request(target, headers: hopHeaders)
-                status = head.status
-                trace.record(.response, originalURL: url, url: target, status: head.status)
-                let success = (200..<300).contains(head.status)
-                let location = HeldSourceConnection.redirectLocation(head)
-                guard let response = HeldSourceConnection.makeResponse(head, url: target) else {
-                    release(connection, refusal: "status \(head.status)")
-                    throw PersistentHTTP1Connection.ConnectionError.malformed("status \(head.status)")
-                }
-                if !success || location != nil {
-                    let refusal: String?
-                    do {
-                        refusal = try await connection.discardBody(head) { received = $0 }
-                    } catch {
-                        release(connection, refusal: Task.isCancelled ? "cancelled" : EngineLog.summary(of: error))
-                        throw error
-                    }
-                    release(connection, refusal: refusal)
-                    if let location {
-                        guard hops < Self.maxRedirects else {
-                            throw PersistentHTTP1Connection.ConnectionError.tooManyRedirects
-                        }
-                        guard let next = URL(string: location, relativeTo: target)?.absoluteURL else {
-                            throw PersistentHTTP1Connection.ConnectionError.malformed("unresolvable Location: \(location)")
-                        }
-                        trace.record(.redirect, originalURL: url, url: next, status: head.status)
-                        hops += 1
-                        target = next
-                        continue
-                    }
-                    trace.record(.completed, originalURL: url, url: target,
-                                 status: head.status, bytes: received)
-                    return Body(finished: response)
-                }
-                let framing = PersistentHTTP1Connection.framing(for: head)
-                if case .identity(let length) = framing, length > Int64(limit) {
-                    release(connection, refusal: "body of \(length) bytes over the \(limit) byte limit")
-                    throw BoundedFetch.Exceeded(limit: limit)
-                }
-                return Body(
-                    transport: self, connection: connection, head: head, response: response,
-                    framing: framing, limit: limit, reused: reused, trace: trace, originalURL: url)
+        while true {
+            hop.url = target
+            hop.status = nil
+            let hopHeaders = RedirectHeaderPolicy.headersToReplay(
+                extraHeaders: headers, originalURL: url, redirectURL: target)
+            let (connection, head, reused) = try await request(target, headers: hopHeaders)
+            hop.status = head.status
+            trace.record(.response, originalURL: url, url: target, status: head.status)
+            let success = (200..<300).contains(head.status)
+            let location = HeldSourceConnection.redirectLocation(head)
+            guard let response = HeldSourceConnection.makeResponse(head, url: target) else {
+                release(connection, refusal: "status \(head.status)")
+                throw PersistentHTTP1Connection.ConnectionError.malformed("status \(head.status)")
             }
-        } catch {
-            trace.record(.completed, originalURL: url, url: target,
-                         status: status, bytes: received, error: error)
-            throw error
+            if !success || location != nil {
+                let refusal: String?
+                do {
+                    refusal = try await connection.discardBody(head)
+                } catch {
+                    release(connection, refusal: Task.isCancelled ? "cancelled" : EngineLog.summary(of: error))
+                    throw error
+                }
+                release(connection, refusal: refusal)
+                if let location {
+                    guard hops < Self.maxRedirects else {
+                        throw PersistentHTTP1Connection.ConnectionError.tooManyRedirects
+                    }
+                    guard let next = URL(string: location, relativeTo: target)?.absoluteURL else {
+                        throw PersistentHTTP1Connection.ConnectionError.malformed("unresolvable Location: \(location)")
+                    }
+                    trace.record(.redirect, originalURL: url, url: next, status: head.status)
+                    hops += 1
+                    target = next
+                    continue
+                }
+                trace.record(.completed, originalURL: url, url: target, status: head.status)
+                return Body(finished: response)
+            }
+            let framing = PersistentHTTP1Connection.framing(for: head)
+            if case .identity(let length) = framing, length > Int64(limit) {
+                release(connection, refusal: "body of \(length) bytes over the \(limit) byte limit")
+                throw BoundedFetch.Exceeded(limit: limit)
+            }
+            return Body(
+                transport: self, connection: connection, head: head, response: response,
+                framing: framing, limit: limit, reused: reused, trace: trace, originalURL: url)
         }
     }
 
@@ -332,7 +343,7 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
 
         deinit {
             // A body dropped unread must not hold its origin.
-            finish(refusal: "body dropped mid-read", error: URLError(.cancelled))
+            finish(refusal: "body dropped mid-read", phase: .abandoned)
         }
 
         /// The next piece of the body, nil at its end.
@@ -391,9 +402,8 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
                 finish(refusal: refusal)
                 return nil
             case .overLimit:
-                let error = BoundedFetch.Exceeded(limit: limit)
-                finish(refusal: "body over the \(limit) byte limit", error: error)
-                throw error
+                finish(refusal: "body over the \(limit) byte limit", phase: .bodyLimitExceeded)
+                throw BoundedFetch.Exceeded(limit: limit)
             case .drain:
                 // The read in flight when the body was abandoned is back; the drain goes on from
                 // here, off the caller's task.
@@ -454,10 +464,7 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
             while let current = lock.withLock({ released ? nil : framing }) {
                 do {
                     let (chunk, advanced) = try await connection.readChunk(current, progress: progress)
-                    lock.withLock {
-                        framing = advanced
-                        if let chunk { received += Int64(chunk.count) }
-                    }
+                    lock.withLock { framing = advanced }
                     guard let chunk else {
                         finish(refusal: head.flatMap { PersistentHTTP1Connection.reuseRefusal($0, advanced) }, drained: true)
                         return
@@ -476,19 +483,15 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
 
         /// Releases the claim once, from whichever of the end, a failure, the drain or its deadline
         /// gets there first.
-        private func finish(refusal: String?, drained: Bool = false, error: Error? = nil) {
+        private func finish(refusal: String?, drained: Bool = false,
+                            phase: SourceNetworkDiagnostics.Phase = .completed, error: Error? = nil) {
             guard let connection else { return }
-            let terminal = lock.withLock { () -> (bytes: Int64, abandoned: Bool)? in
+            let outcome = lock.withLock { () -> (bytes: Int64, abandoned: Bool)? in
                 guard !released else { return nil }
                 released = true
                 return (received, abandoned)
             }
-            guard let terminal else { return }
-            if let trace, let originalURL {
-                trace.record(.completed, originalURL: originalURL, url: response.url ?? originalURL,
-                             status: response.statusCode, bytes: terminal.bytes,
-                             error: error ?? (terminal.abandoned ? URLError(.cancelled) : nil))
-            }
+            guard let outcome else { return }
             if drained, refusal == nil {
                 EngineLog.emit(
                     "[HLSVODIngest] AE#732 connection \(connection.label) drained, kept for the next request",
@@ -498,6 +501,12 @@ final class PersistentHTTP1Transport: @unchecked Sendable {
                 transport.release(connection, refusal: refusal)
             } else {
                 connection.retire(reason: refusal ?? "transport gone")
+            }
+            // Emit outside the body/pool locks, once, after the request releases its origin.
+            if let trace, let originalURL {
+                trace.record(outcome.abandoned ? .abandoned : phase,
+                             originalURL: originalURL, url: response.url ?? originalURL,
+                             status: response.statusCode, bytes: outcome.bytes, error: error)
             }
         }
 
@@ -644,8 +653,7 @@ final class PersistentHTTP1Connection: @unchecked Sendable {
 
     /// Reads a non-2xx body to its end so the connection survives it. nil when the connection may
     /// carry the next request, the reason otherwise.
-    func discardBody(_ head: HeldSourceConnection.ResponseHead,
-                     progress: (Int64) -> Void) async throws -> String? {
+    func discardBody(_ head: HeldSourceConnection.ResponseHead) async throws -> String? {
         var framing = Self.framing(for: head)
         if case .identity(let length) = framing, length > Int64(Self.maxDiscardedBodyBytes) {
             return "status \(head.status) body not drained"
@@ -658,7 +666,6 @@ final class PersistentHTTP1Connection: @unchecked Sendable {
             framing = advanced
             guard let chunk else { break }
             discarded += chunk.count
-            progress(Int64(discarded))
             if discarded > Self.maxDiscardedBodyBytes { return "status \(head.status) body not drained" }
         }
         return Self.reuseRefusal(head, framing)

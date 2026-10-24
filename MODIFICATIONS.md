@@ -13,9 +13,10 @@ from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
   extensible `Role`/`Phase` values preserving the existing raw tokens.
 - A source-literal regression detects drift in finite HLS reason mappings. The
   historical `playlistUnreachable` name also covers segment and AES key refusals.
-- The fork retains its additional held HTTP/1 body status, partial-byte, redirect
-  and drain diagnostics. Their existing terminal event semantics are preserved.
-  Upstream #809 and #819 supersede the old local test-isolation workarounds.
+- Held HTTP/1 diagnostics match PR #818: typed `abandoned` / `body_limit_exceeded`
+  terminal events, drain bytes excluded, and an open that fails after its head names
+  the hop that answered (`codex/held-http-failed-open-evidence`). The earlier fork-only
+  shape is retired. Upstream #809 and #819 supersede the old local test-isolation workarounds.
 
 - HTTP scheme dispatch is case insensitive.
 - HLS ingest preserves terminal transport errors, segment retry failures and key HTTP

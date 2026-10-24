@@ -251,203 +251,123 @@ struct SourceFailureDiagnosticsTests {
         #expect(Set(captured.map(\.requestID)).count == 1)
     }
 
-    @Test("A held streamed body keeps its request identity through redirects and later reads", .timeLimit(.minutes(1)))
-    func heldStreamKeepsTraceUntilBodyEnds() async throws {
-        let events = CorrelationEvents()
-        let previous = SourceNetworkDiagnostics.handler
-        SourceNetworkDiagnostics.handler = { events.add($0) }
-        defer { SourceNetworkDiagnostics.handler = previous }
-        let payload = Data(repeating: 0x47, count: 3_000)
-        let cdn = try #require(KeepAliveOrigin())
-        defer { cdn.stop() }
-        cdn.route = { _ in .init(body: payload, chunked: true) }
-        let edge = try #require(KeepAliveOrigin())
-        defer { edge.stop() }
-        let target = cdn.url("/segment.ts")
-        edge.route = { _ in .init(status: 302, headers: ["Location": target.absoluteString]) }
-        let url = edge.url("/segment.ts")
-        let original = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
-        let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
-        let transport = PersistentHTTP1Transport(label: "diagnostic")
-        defer { transport.close() }
-        let body = try await transport.open(url, headers: ["Authorization": "private-fixture"], limit: 4_096,
-                                            diagnosticContext: original, role: .hlsSegment)
-        let opened = events.snapshot().filter { $0.originalURL == url }
-        #expect(opened.map(\.phase) == [.response, .redirect, .response])
-        #expect(opened.map(\.status) == [302, 302, 200])
-        #expect(opened.last?.url == target)
-        let received = try await SourceNetworkDiagnostics.$context.withValue(replacement) {
-            var data = Data()
-            while let chunk = try await body.next() { data.append(chunk) }
-            return data
-        }
-        #expect(received == payload)
-        #expect(try await body.next() == nil)
-        body.abandon()
-        let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == [.response, .redirect, .response, .completed])
-        #expect(captured.allSatisfy { $0.context == original && $0.role == .hlsSegment })
-        #expect(Set(captured.map(\.requestID)).count == 1)
-        #expect(captured.last?.bytes == Int64(payload.count))
-        #expect(captured.last?.url == target && captured.last?.urlErrorCode == nil)
-        #expect(edge.requests.first?.headers["authorization"] == "private-fixture")
-        #expect(cdn.requests.first?.headers["authorization"] == nil)
-    }
-
-    @Test("A held HTTP refusal completes once without a synthetic transport failure", .timeLimit(.minutes(1)))
-    func heldRefusalCompletesWithRealStatus() async throws {
-        let events = CorrelationEvents()
-        let previous = SourceNetworkDiagnostics.handler
-        SourceNetworkDiagnostics.handler = { events.add($0) }
-        defer { SourceNetworkDiagnostics.handler = previous }
-        let server = try #require(KeepAliveOrigin())
-        defer { server.stop() }
-        let payload = Data("denied".utf8)
-        server.route = { _ in .init(status: 403, body: payload) }
-        let url = server.url("/denied")
-        let transport = PersistentHTTP1Transport(label: "diagnostic")
-        defer { transport.close() }
-        let answer = try await transport.get(url, headers: [:], limit: 1_024)
-        #expect(answer.response.statusCode == 403 && answer.body.isEmpty)
-        let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == [.response, .completed])
-        #expect(captured.allSatisfy { $0.status == 403 && $0.urlErrorCode == nil && $0.context == nil })
-        #expect(captured.last?.bytes == Int64(payload.count))
-        #expect(Set(captured.map(\.requestID)).count == 1)
-    }
-
-    @Test("A held body limit emits one terminal event before or during streaming",
-          .timeLimit(.minutes(1)), arguments: [false, true])
-    func heldBodyLimitCompletesOnce(chunked: Bool) async throws {
-        let events = CorrelationEvents()
-        let previous = SourceNetworkDiagnostics.handler
-        SourceNetworkDiagnostics.handler = { events.add($0) }
-        defer { SourceNetworkDiagnostics.handler = previous }
-        let server = try #require(KeepAliveOrigin())
-        defer { server.stop() }
-        server.route = { _ in .init(body: Data(count: 4_096), chunked: chunked) }
-        let url = server.url("/oversized")
-        let transport = PersistentHTTP1Transport(label: "diagnostic")
-        defer { transport.close() }
-        do {
-            _ = try await transport.get(url, headers: [:], limit: 1_024)
-            Issue.record("An oversized held response must fail")
-        } catch let error as BoundedFetch.Exceeded {
-            #expect(error.limit == 1_024)
-        }
-        let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == [.response, .completed])
-        #expect(captured.allSatisfy { $0.status == 200 })
-        #expect(Set(captured.map(\.requestID)).count == 1)
-        if chunked { #expect((captured.last?.bytes ?? 0) > 1_024) }
-        else { #expect(captured.last?.bytes == 0) }
-    }
-
-    @Test("A truncated held body preserves its partial byte evidence", .timeLimit(.minutes(1)))
-    func heldReadFailureCompletesOnce() async throws {
-        let events = CorrelationEvents()
-        let previous = SourceNetworkDiagnostics.handler
-        SourceNetworkDiagnostics.handler = { events.add($0) }
-        defer { SourceNetworkDiagnostics.handler = previous }
-        let payload = Data(repeating: 0x47, count: 512)
+    @Test("Held HTTP bodies complete once after consumption and keep their captured owner",
+          .timeLimit(.minutes(1)), arguments: [200, 403])
+    func heldBodyCompletion(status: Int) async throws {
+        let payload = Data(repeating: 0x47, count: 4096)
         let server = try #require(ScriptedOriginServer { _ in
-            .init(status: 200, declaredLength: 4_096, close: true, body: payload)
+            .init(status: status, declaredLength: Int64(payload.count), close: true, body: payload)
         })
         defer { server.stop() }
-        let url = URL(string: "http://127.0.0.1:\(server.port)/truncated.ts")!
-        let transport = PersistentHTTP1Transport(label: "diagnostic")
+        let transport = PersistentHTTP1Transport(label: "diagnostics-test")
         defer { transport.close() }
-        do {
-            _ = try await transport.get(url, headers: [:], limit: 8_192)
-            Issue.record("A truncated held response must fail")
-        } catch let error as PersistentHTTP1Connection.ConnectionError {
-            guard case .malformed = error else { throw error }
-        }
-        let captured = events.snapshot().filter { $0.originalURL == url }
-        #expect(captured.map(\.phase) == [.response, .completed])
-        #expect(captured.allSatisfy { $0.status == 200 })
-        #expect(captured.last?.bytes == Int64(payload.count))
-        #expect(Set(captured.map(\.requestID)).count == 1)
-    }
-
-    @Test("An abandoned held body completes once after its drain with its original owner", .timeLimit(.minutes(1)))
-    func heldDrainKeepsCapturedContext() async throws {
+        let url = URL(string: "http://127.0.0.1:\(server.port)/\(UUID().uuidString).ts")!
         let events = CorrelationEvents()
         let previous = SourceNetworkDiagnostics.handler
-        SourceNetworkDiagnostics.handler = { events.add($0) }
+        SourceNetworkDiagnostics.handler = { if $0.originalURL == url { events.add($0) } }
         defer { SourceNetworkDiagnostics.handler = previous }
-        let server = try #require(KeepAliveOrigin())
-        defer { server.stop() }
-        let payload = Data(repeating: 0x47, count: 188 * 8)
-        server.route = { _ in .init(body: payload, trickleUs: 20_000) }
-        let url = server.url("/abandoned.ts")
-        let original = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
+        let owner = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
         let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
-        let transport = PersistentHTTP1Transport(label: "diagnostic")
-        defer { transport.close() }
-        let body = try await transport.open(url, headers: [:], limit: 4_096,
-                                            diagnosticContext: original, role: .hlsSegment)
-        #expect(try await body.next() != nil)
-        SourceNetworkDiagnostics.$context.withValue(replacement) { body.abandon() }
-        try await waitFor { events.snapshot().contains { $0.originalURL == url && $0.phase == .completed } }
-        let next = try await transport.get(server.url("/next.ts"), headers: [:], limit: 4_096)
-        #expect(next.body == payload)
+        let body = try await SourceNetworkDiagnostics.$context.withValue(replacement) {
+            try await transport.open(url, headers: [:], limit: payload.count,
+                                     diagnosticContext: owner, role: .hlsSegment)
+        }
+        if status == 200 {
+            #expect(!events.snapshot().contains { $0.phase == .completed })
+        }
+        var received = Data()
+        while let chunk = try await body.next() { received.append(chunk) }
+        #expect(received == (status == 200 ? payload : Data()))
+        #expect(try await body.next() == nil)
         body.abandon()
-        let captured = events.snapshot().filter { $0.originalURL == url }
+        let captured = events.snapshot()
         #expect(captured.map(\.phase) == [.response, .completed])
-        #expect(captured.allSatisfy { $0.context == original && $0.role == .hlsSegment })
-        #expect(captured.last?.urlErrorCode == NSURLErrorCancelled)
-        #expect(captured.last?.bytes == Int64(payload.count))
+        #expect(captured.allSatisfy { $0.context == owner && $0.status == status && $0.role == .hlsSegment })
         #expect(Set(captured.map(\.requestID)).count == 1)
-        #expect(server.connectionCount == 1, "the small drain preserves the upstream connection reuse")
+        #expect(captured.last?.bytes == Int64(received.count))
     }
 
-    @Test("Held VOD segment opens retain the reader context after a different attempt starts", .timeLimit(.minutes(1)))
-    func heldVODReaderKeepsCapturedContext() async throws {
+    @Test("Held HTTP body limits report one terminal event before or during streaming",
+          .timeLimit(.minutes(1)), arguments: [true, false])
+    func heldBodyLimit(declaredLength: Bool) async throws {
+        let payload = Data(repeating: 0x47, count: 4096)
+        let server = try #require(ScriptedOriginServer { _ in
+            .init(status: 200, declaredLength: declaredLength ? Int64(payload.count) : nil,
+                  close: true, body: payload)
+        })
+        defer { server.stop() }
+        let transport = PersistentHTTP1Transport(label: "diagnostics-limit-test")
+        defer { transport.close() }
+        let url = URL(string: "http://127.0.0.1:\(server.port)/\(UUID().uuidString).ts")!
         let events = CorrelationEvents()
         let previous = SourceNetworkDiagnostics.handler
-        SourceNetworkDiagnostics.handler = { events.add($0) }
+        SourceNetworkDiagnostics.handler = { if $0.originalURL == url { events.add($0) } }
         defer { SourceNetworkDiagnostics.handler = previous }
-        let server = try #require(KeepAliveOrigin())
+        do {
+            _ = try await transport.get(url, headers: [:], limit: 16, role: .hlsSegment)
+            Issue.record("An oversized body must fail")
+        } catch let error as BoundedFetch.Exceeded {
+            #expect(error.limit == 16)
+        }
+        let captured = events.snapshot()
+        #expect(captured.map(\.phase) == [.response, .bodyLimitExceeded])
+        #expect(captured.allSatisfy { $0.status == 200 }, "the terminal event keeps the status the head carried")
+        #expect(captured.allSatisfy { $0.context == nil && $0.role == .hlsSegment })
+        #expect(Set(captured.map(\.requestID)).count == 1)
+    }
+
+    // A held open that fails after a redirect names the hop that answered, not the URL it started at.
+    @Test("A held open that fails after a redirect reports the failing hop and its status",
+          .timeLimit(.minutes(1)))
+    func heldOpenFailureAfterRedirect() async throws {
+        let payload = Data(repeating: 0x47, count: 4096)
+        let server = try #require(ScriptedOriginServer { request in
+            request.path.hasSuffix("/moved.ts")
+                ? .init(status: 200, declaredLength: Int64(payload.count), close: true, body: payload)
+                : .init(status: 302, declaredLength: 0, location: "/moved.ts")
+        })
         defer { server.stop() }
-        let playlist = Data("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts\n#EXT-X-ENDLIST\n".utf8)
-        let payload = Data(repeating: 0x47, count: 188 * 3)
-        server.route = { path in .init(body: path == "/vod.m3u8" ? playlist : payload) }
-        let url = server.url("/vod.m3u8")
-        let segmentURL = server.url("/segment.ts")
-        let original = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
-        let replacement = SourceNetworkDiagnostics.Context(playbackID: UUID(), attemptID: UUID())
-        let reader = SourceNetworkDiagnostics.$context.withValue(original) {
-            HLSVODIngestReader(playlistURL: url, httpHeaders: [:], persistentHTTP1: true)
+        let transport = PersistentHTTP1Transport(label: "diagnostics-redirect-test")
+        defer { transport.close() }
+        let url = URL(string: "http://127.0.0.1:\(server.port)/\(UUID().uuidString).ts")!
+        let events = CorrelationEvents()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { if $0.originalURL == url { events.add($0) } }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        await #expect(throws: BoundedFetch.Exceeded.self) {
+            _ = try await transport.get(url, headers: [:], limit: 16, role: .hlsSegment)
         }
-        defer { reader.close() }
-        let result = try await SourceNetworkDiagnostics.$context.withValue(replacement) {
-            try await withTaskCancellationHandler {
-                try await ProbeTestJob {
-                    var data = Data()
-                    var buffer = [UInt8](repeating: 0, count: 1_024)
-                    while true {
-                        let count = buffer.withUnsafeMutableBufferPointer {
-                            reader.read($0.baseAddress, size: 1_024)
-                        }
-                        if count <= 0 { return data }
-                        data.append(contentsOf: buffer.prefix(Int(count)))
-                    }
-                }.outcome()
-            } onCancel: {
-                reader.close()
-            }
+        let captured = events.snapshot()
+        #expect(captured.map(\.phase) == [.response, .redirect, .response, .bodyLimitExceeded])
+        let terminal = try #require(captured.last)
+        #expect(terminal.url?.path == "/moved.ts")
+        #expect(terminal.status == 200)
+        #expect(Set(captured.map(\.requestID)).count == 1)
+    }
+
+    @Test("Abandoning or dropping a held HTTP body reports once without claiming success",
+          .timeLimit(.minutes(1)), arguments: [true, false])
+    func heldBodyAbandoned(explicit: Bool) async throws {
+        let server = try #require(ScriptedOriginServer { _ in
+            .init(status: 200, declaredLength: nil, close: true, body: Data(repeating: 0x47, count: 4096))
+        })
+        defer { server.stop() }
+        let transport = PersistentHTTP1Transport(label: "diagnostics-abandon-test")
+        defer { transport.close() }
+        let url = URL(string: "http://127.0.0.1:\(server.port)/\(UUID().uuidString).ts")!
+        let events = CorrelationEvents()
+        let previous = SourceNetworkDiagnostics.handler
+        SourceNetworkDiagnostics.handler = { if $0.originalURL == url { events.add($0) } }
+        defer { SourceNetworkDiagnostics.handler = previous }
+        var body: PersistentHTTP1Transport.Body? = try await transport.open(url, headers: [:], limit: 8192)
+        if explicit {
+            body?.abandon()
+            body?.abandon()
         }
-        #expect(try result.get() == payload)
-        let captured = events.snapshot().filter { $0.originalURL == url || $0.originalURL == segmentURL }
-        #expect(captured.filter { $0.phase == .response }.count == 2)
-        #expect(captured.filter { $0.phase == .completed }.count == 2)
-        #expect(captured.allSatisfy { $0.context == original && $0.status == 200 && $0.urlErrorCode == nil })
-        #expect(captured.filter { $0.originalURL == url }.allSatisfy { $0.role == .hlsPlaylist })
-        #expect(captured.filter { $0.originalURL == segmentURL }.allSatisfy { $0.role == .hlsSegment })
-        #expect(Set(captured.map(\.requestID)).count == 2)
-        #expect(captured.first { $0.originalURL == segmentURL && $0.phase == .completed }?.bytes == Int64(payload.count))
-        #expect(server.connectionCount == 1)
+        body = nil
+        try await waitFor { events.snapshot().contains { $0.phase == .abandoned } }
+        #expect(events.snapshot().map(\.phase) == [.response, .abandoned])
+        #expect(Set(events.snapshot().map(\.requestID)).count == 1)
     }
 
     @Test("Bounded HLS requests report real HTTP refusals without synthetic cancellation")
@@ -602,6 +522,7 @@ struct SourceFailureDiagnosticsTests {
             #expect(engine.errorInfo?.underlyingCode == NSURLErrorCannotConnectToHost)
         }
     }
+    /// In-process ranged source: exercise the reader and real URLSession delegates without a server.
     private final class RangedSource: URLProtocol, @unchecked Sendable {
         override class func canInit(with request: URLRequest) -> Bool { true }
         override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }

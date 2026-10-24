@@ -22,7 +22,8 @@ the public-API contract.
   `SourceNetworkDiagnostics` events carry a captured playback/attempt context across redirects and
   internal reloads and AVIO thread crossings, including streamed held HTTP/1 bodies. Immutable
   events use extensible string-backed roles and phases. Refused AES key requests use the historical
-  `playlistUnreachable(status:)` case to preserve their HTTP status. The observer does not alter request policy and requires hosts to redact source URLs.
+  `playlistUnreachable(status:)` case to preserve their HTTP status. A held HTTP/1 open that fails
+  after its response head reports the hop that answered and its status. The observer does not alter request policy and requires hosts to redact source URLs.
 
 ## [7.47.0] - 2026-10-23
 

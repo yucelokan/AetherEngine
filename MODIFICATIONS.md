@@ -1,13 +1,13 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-27. Integration base: upstream 7.48.0
-(`263dc11579274e83458bd3839715caf99f3d8969`).
+Updated: 2026-10-28. Integration base: upstream 7.49.0
+(`fe96b19566fcff9910d3b8e1f8045587e497c1d6`).
 
 ## Current differences
 
 None in the engine. The fork's source-failure diagnostics landed upstream as PR #818
 (merge `aa0bf3b3bda200196b8ad0edaf7481a5fe12cc3a`, released in 7.48.0), including its
-second-review fix and the held HTTP/1 failing-hop follow-up. The tree matches 7.48.0;
+second-review fix and the held HTTP/1 failing-hop follow-up. The tree matches 7.49.0;
 this file and `COPYING.GPL3` are the only additions. Fixes made here are generic and go
 upstream as pull requests.
 
@@ -51,7 +51,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.48.0 integration.
+and is included in the current 7.49.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

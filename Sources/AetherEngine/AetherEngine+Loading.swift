@@ -808,6 +808,7 @@ extension AetherEngine {
         dvrWindowSeconds: Double? = nil,
         liveRejoin: Bool = false,
         preopenedDemuxer: Demuxer? = nil,
+        keepsMediaPlaylistRoute: Bool = false,
         generation: UInt64,
         resolvePanelRouting: (() async throws -> Bool)? = nil
     ) async throws {
@@ -1353,6 +1354,13 @@ extension AetherEngine {
         // #93 residual: hand the resume position to the session so the FIRST producer anchors at
         // the matching segment instead of producing seg0 into an immediate teardown.
         session.initialStartSeconds = startPosition
+        if keepsMediaPlaylistRoute {
+            session.keepsMediaPlaylistRoute = true
+            EngineLog.emit(
+                "[AetherEngine] #849 audio switch keeps the media playlist: the display refused this "
+                + "session's HDR master, and the switch does not change what it was asked",
+                category: .session)
+        }
 
         // session.start() opens its own Demuxer + prewarm seek (~1-3 s on slow CDN); detach so @MainActor doesn't block.
         var playbackURL: URL
@@ -1974,6 +1982,17 @@ extension AetherEngine {
         logAudibleReadback(host: host)
     }
 
+    /// The active audio track's channel count from the published track list, nil when unknown.
+    /// `audioSourceStreamIndex` is accepted because during a reload (track change) `activeAudioTrackIndex`
+    /// is temporarily nil (cleared by stopInternal), so the published property cannot be relied on.
+    func ownSourceChannels(audioSourceStreamIndex: Int32? = nil) -> Int? {
+        let lookupIndex = audioSourceStreamIndex.flatMap { Int(exactly: $0) } ?? activeAudioTrackIndex
+        if let index = lookupIndex, let track = audioTracks.first(where: { $0.id == index }), track.channels > 0 {
+            return track.channels
+        }
+        return nil
+    }
+
     /// Activate AVAudioSession for renderer paths (SoftwarePlaybackHost, audio hosts) that have no AVPlayerViewController. Native path deliberately skips this: AVKit activates per playback so tvOS can auto-negotiate the HDMI route (issue #24).
     ///
     /// Called once per load, and again when an interruption ends on a renderer path (AE#549): these
@@ -1984,24 +2003,26 @@ extension AetherEngine {
     /// iOS/tvOS 27 flag it as a hang risk on the main thread (AE#538): the same reasoning that moved `setCategory` off-main
     /// in #114 and the teardown deactivation in #215. Only the track lookup, which reads published state, stays here.
     func activateRendererAudioSession(audioSourceStreamIndex: Int32? = nil) async {
+        guard rendererAudioSessionActivationEnabled else { return }
         #if os(iOS) || os(tvOS)
         // Resolve the active audio track's channel count from the already-published track list.
         // so the HDMI / AirPlay link negotiates at the correct channel count.
         // Accept an explicit stream index parameter because during a reload (track change)
         // `activeAudioTrackIndex` is temporarily nil (cleared by stopInternal), so the
         // published property cannot be relied on here.
-        let lookupIndex = audioSourceStreamIndex.flatMap { Int(exactly: $0) } ?? activeAudioTrackIndex
-        let sourceChannels: Int? = if let index = lookupIndex, let track = audioTracks.first(where: { $0.id == index }), track.channels > 0 {
-            track.channels
-        } else {
-            nil
-        }
+        let sourceChannels = ownSourceChannels(audioSourceStreamIndex: audioSourceStreamIndex)
         SharedOutputCoordinator.shared.noteSourceChannels(sourceChannels, for: ObjectIdentifier(self))
         let preferred = SharedOutputCoordinator.shared.preferredSourceChannels ?? sourceChannels
-        await enqueueAudioSessionTransition {
+        await performRendererAudioSessionActivation {
             AetherEngine.applyRendererAudioSession(sourceChannels: preferred)
-        }.value
+        }
         #endif
+    }
+
+    /// Kept platform-independent so the ownership gate can be exercised without an audio session.
+    func performRendererAudioSessionActivation(_ operation: @escaping @Sendable () async -> Void) async {
+        guard rendererAudioSessionActivationEnabled else { return }
+        await enqueueAudioSessionTransition(operation).value
     }
 
     #if os(iOS) || os(tvOS)
@@ -2014,7 +2035,7 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] activateRendererAudioSession error: \(error)", category: .engine)
         }
         let maxCh = session.maximumOutputNumberOfChannels
-        let prefCh = min(sourceChannels ?? maxCh, maxCh)
+        let prefCh = preferredOutputChannels(sourceChannels: sourceChannels, maxOutput: maxCh)
         try? session.setPreferredOutputNumberOfChannels(prefCh)
         EngineLog.emit("[AetherEngine] renderer audio session active: sourceCh=\(sourceChannels?.formatted() ?? "unknown") maxChannels=\(maxCh) preferred=\(session.preferredOutputNumberOfChannels) output=\(session.outputNumberOfChannels)", category: .engine)
     }
@@ -2068,6 +2089,7 @@ extension AetherEngine {
         host.dolbyVisionHandling = loadedOptions.dolbyVisionHandling
         host.preferDualLayerDolbyVision = loadedOptions.preferDualLayerDolbyVision
         host.elType = elType ?? sourceElType
+        host.objectAudioRendering = loadedOptions.objectAudioRendering
         host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
         if isLive { host.liveEdgeCushionSeconds = loadedOptions.liveEdgeCushionSeconds }
         // AE#813: a live ingest delivers whole segments, and the host's holdback follows their length.
@@ -2090,6 +2112,12 @@ extension AetherEngine {
                 self.decodedVideoFormat = format
             }
         }
+        host.onClockHoldTransition = { [weak self, weak host] transition in
+            Task { @MainActor in
+                guard let self, let host, self.softwareHost === host else { return }
+                self.applyClockHoldTransition(transition)
+            }
+        }
         // The clock's real session zero, for the chapter axis (`mediaChapters`).
         host.onClockSessionZero = { [weak self, weak host] zero in
             Task { @MainActor in
@@ -2103,6 +2131,7 @@ extension AetherEngine {
             self?.publishLiveWindow(edgeSessionTime: edge)
         }
         self.softwareHost = host
+        startSoftwareNowPlaying()
         armHeldPictureRelease(onSoftwareHost: host)
         // #311: a load builds a new host and a new renderer, so an observer installed once by the
         // host app has to be carried across the seam, exactly as the native session does at load.
@@ -2243,6 +2272,8 @@ extension AetherEngine {
             host.stop()
             try checkLoadCurrent(generation)
         }
+        // The audio route is settled by `load`: an object-audio one keeps the HDMI link in Atmos.
+        followAtmosOutput()
     }
 
     /// Open `AudioPlaybackHost` for an audio-only source. No HLS pipeline, display layer, or display-criteria handshake. Same lifecycle as `loadSoftware`.
@@ -2431,7 +2462,8 @@ extension AetherEngine {
         expectedGeneration: UInt64,
         discTitleIDOverride: Int? = nil,
         resumeOverride: Double? = nil,
-        resumePlaying: Bool? = nil
+        resumePlaying: Bool? = nil,
+        keepsDisplayRefusedMediaRoute: Bool = false
     ) async -> Error? {
         // Liveness guard: a stop()/load() between scheduling and here would resurrect a dismissed session or kill the successor. Generation captured at schedule time; both stop() and load() invalidate it.
         guard loadGeneration == expectedGeneration, loadedURL != nil else {
@@ -2569,12 +2601,20 @@ extension AetherEngine {
                 return nil
             }
         }
+        // AE#849: read before the teardown resets it. See `MasterFallbackDecision.audioSwitchKeepsMediaRoute`.
+        let keepsMediaRoute = keepsDisplayRefusedMediaRoute
+            && MasterFallbackDecision.audioSwitchKeepsMediaRoute(
+                outgoingServingMaster: nativeVideoSession?.servingMasterPlaylist ?? true,
+                outgoingMasterRefusedByDisplay: masterRefusedByDisplay)
         stopInternal(resetDisplayCriteria: false,
                      keepNativeHost: !targetSoftwarePath && !mediaServicesWereReset,
                      keepCustomReader: true, keepCurrentItem: keepAudioSwitchItem)
         sessionCacheStatusToken &+= 1
         diagnostics.sessionCacheStatus = .inactive
         pendingInPlaceItemHandover = keepAudioSwitchItem
+        // The rebuilt session starts on the media playlist and never falls back itself, so it inherits
+        // the refusal, or the switch after this one would serve the master again.
+        masterRefusedByDisplay = keepsMediaRoute
         if mediaServicesWereReset { dropAudioPlayerHostAfterMediaServicesReset() }
         EngineLog.emit("[AetherEngine] reload: stopInternal done (\(elapsedMs(since: reloadStart))ms)", category: .engine)
         let gen = loadGeneration
@@ -2705,7 +2745,8 @@ extension AetherEngine {
                 )
                 // AE#462: the rebuilt host's own resolved index (see the load site).
                 activeAudioDecoder = Self.softwareAudioDecoderLabel(
-                    audioTracks: audioTracks, activeIndex: softwareHost?.audioStreamIndex ?? -1
+                    audioTracks: audioTracks, activeIndex: softwareHost?.audioStreamIndex ?? -1,
+                    route: softwareHost?.audioRoute ?? .pcm
                 )
                 presentCurrentLayer()
                 // Keep the latest transport intent if play/pause changed while the rebuild awaited I/O.
@@ -2721,7 +2762,6 @@ extension AetherEngine {
                     hostAsserts: loadedOptions.panelIsInHDRMode,
                     criteriaReadoutAtLoad: sessionPanelHDRReadout,
                     attemptWhenUnproven: loadedOptions.attemptsHDRMasterOnUnprovenPanel,
-                    isLive: loadedOptions.isLive,
                     displayEligibleForHDR: sessionDisplayEligibleForHDR,
                     panelRefusedHDRMaster: Self.panelRefusedHDRMaster)
                 if reloadRoutingPanelHDR != loadedOptions.panelIsInHDRMode {
@@ -2774,6 +2814,7 @@ extension AetherEngine {
                     // Live reload = live REJOIN: skip initial seek so AVPlayer joins at edge-minus-holdback, not the stale rebuilt start. See LiveReloadPolicy.
                     liveRejoin: loadedOptions.isLive,
                     preopenedDemuxer: customPreopened,
+                    keepsMediaPlaylistRoute: keepsMediaRoute,
                     generation: gen
                 )
                 EngineLog.emit("[AetherEngine] reload: loadNative done (\(elapsedMs(since: loadStart))ms)", category: .engine)

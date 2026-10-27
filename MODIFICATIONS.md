@@ -1,63 +1,17 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-24. Integration base: upstream 7.47.0
-(`a1a70cd63c1fef89cffcf0e8110456807d0fab05`). The source-failure diagnostics
-from fork `08e0feb63b5b106549c02882171df931d2b6256b` are retained.
+Updated: 2026-10-27. Integration base: upstream 7.48.0
+(`263dc11579274e83458bd3839715caf99f3d8969`).
 
 ## Current differences
 
-- PR #818 review corrections retain `liveSourceUnavailable` on failed live starts,
-  with original URL domain/code. HTTP and TLS refusals keep their specific kinds.
-- Source ownership is captured before detached opens and retained by AVIO delegates,
-  fresh session readers, reconnects and prefetch. Event fields are immutable, with
-  extensible `Role`/`Phase` values preserving the existing raw tokens.
-- A source-literal regression detects drift in finite HLS reason mappings. The
-  historical `playlistUnreachable` name also covers segment and AES key refusals.
-- Held HTTP/1 diagnostics match PR #818: typed `abandoned` / `body_limit_exceeded`
-  terminal events, drain bytes excluded, and an open that fails after its head names
-  the hop that answered (`codex/held-http-failed-open-evidence`). The earlier fork-only
-  shape is retired. Upstream #809 and #819 supersede the old local test-isolation workarounds.
-
-- HTTP scheme dispatch is case insensitive.
-- HLS ingest preserves terminal transport errors, segment retry failures and key HTTP
-  refusals. Unsupported HLS formats and invalid/decryption failures have separate
-  machine-readable kinds and stable error codes.
-- Bounded body fetches expose response, redirect, timing and terminal events, including
-  body-limit termination. Intentional refusal cancellation is not a transport error.
-- Failed initial live probes preserve their original transport, HTTP or demux
-  failure through publication and throwing. Runtime source-loss behavior is unchanged.
-- A transport failure at open (reset, timeout) is not a reason to fail the open: the open
-  and the read loop still ride it out on the reconnect ladder, and the reader only records
-  the last URL error. A failed live start attaches that record to `liveSourceUnavailable`
-  when it gives up. Only a TLS trust failure fails the open (PR #818 second review).
-- Demux NSError codes retain the historical open/stream-information/read case
-  values. The original negative FFmpeg result is separate metadata, also exposed
-  as optional `PlaybackErrorInfo.ffmpegErrorCode`; error messages are unchanged.
-- Source diagnostic context is load identity: option corrections refuse a changed
-  context before teardown and keep the original context during tuning rebuilds.
-- Optional `SourceNetworkDiagnostics.handler` observes real reader response,
-  redirect, completion and transaction metrics. It never changes request policy.
-  Events include URLs for host-side correlation: hosts must redact them before
-  persistence. No headers, payloads, or error descriptions are exposed by this API.
-- HLS error diagnostics expose finite `HLSIngestDiagnosticReason` values through
-  `HLSIngestError` and `PlaybackErrorInfo`, preserving the existing numeric codes,
-  messages and error policy. Unknown reason text is mapped to a finite fallback.
-- Hosts may supply opaque playback/attempt UUIDs through
-  `LoadOptions.sourceDiagnosticsContext`. HLS readers and native carriage probes
-  capture that context before creating requests and retain it through internal
-  reloads. Late events cannot borrow a successor's identifiers; identifiers stay
-  in process and do not become HTTP headers. The held HTTP/1 transport and carriage
-  segment probes emit the same source-network event contract. Streamed persistent
-  bodies retain that context until their actual completion, failure or cancellation;
-  header delivery does not prematurely complete the diagnostic event.
-- Regression tests cover mixed-case transport, HTTP refusal classes, connection
-  refusal, nested URL errors, finite HLS causes, delayed request ownership,
-  unattributed requests, header preservation and real request evidence. The exact
-  historical HLS NSError codes are pinned for all cases, and diagnostic assertions
-  filter by fixture identity so concurrent requests cannot change their results.
+None in the engine. The fork's source-failure diagnostics landed upstream as PR #818
+(merge `aa0bf3b3bda200196b8ad0edaf7481a5fe12cc3a`, released in 7.48.0), including its
+second-review fix and the held HTTP/1 failing-hop follow-up. The tree matches 7.48.0;
+this file and `COPYING.GPL3` are the only additions. Fixes made here are generic and go
+upstream as pull requests.
 
 No app identity, provider credentials, routing policy or UI behavior is embedded.
-The earlier fourteen contributions remain incorporated in the integration base.
 
 ## Incorporated contribution and integration work
 
@@ -97,7 +51,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.47.0 integration.
+and is included in the current 7.48.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

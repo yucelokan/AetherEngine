@@ -289,6 +289,10 @@ public final class Demuxer: @unchecked Sendable {
     /// `ConcatIOReader.close()` is a no-op and the bridge does not own its reader, so this is the only
     /// owner left to end the reader's `URLSession`. Guarded by `providerLock`.
     private var _ownedSourceReader: IOReader?
+    /// AE#859: the DASH open in flight, so `markClosed()` reaches its manifest fetch and the
+    /// representation readers it has opened before any of them belongs to a provider. Guarded by
+    /// `providerLock`.
+    private var pendingDASHOpener: DASHSourceOpener?
 
     private func adoptOwnedSourceReader(_ reader: IOReader) {
         providerLock.lock()
@@ -311,8 +315,10 @@ public final class Demuxer: @unchecked Sendable {
     private func cancelOwnedSourceReader() {
         providerLock.lock()
         let reader = _ownedSourceReader
+        let dash = pendingDASHOpener
         providerLock.unlock()
         reader?.cancel()
+        dash?.cancel()
     }
 
     /// Audit HLS-2: `markClosed()` before the provider exists used to be a no-op, so a teardown
@@ -760,10 +766,12 @@ public final class Demuxer: @unchecked Sendable {
         try openWithProvider(bridge, inputFormat: inputFormat, isLive: isLive)
     }
 
-    /// A remote disc image (ISO 9660 / UDF / BDMV) by URL extension. Gates the HTTP disc-adapter
+    /// A remote disc image (ISO 9660 / UDF / BDMV) by URL extension, or an extensionless URL this
+    /// process already recognized as one from its `Content-Type` (AE#860). Gates the HTTP disc-adapter
     /// path so a normal media URL keeps the optimized streaming AVIOReader open with no probe cost.
     static func isDiscImageURL(_ url: URL) -> Bool {
         ["iso", "img", "udf"].contains(url.pathExtension.lowercased())
+            || DiscImageMediaType.isKnownDiscImage(url)
     }
 
     private func openHTTP(url: URL, extraHeaders: [String: String], isLive: Bool = false, selectTitleID: Int? = nil) throws {
@@ -771,40 +779,70 @@ public final class Demuxer: @unchecked Sendable {
         // straight to libavformat fails to probe; it is a filesystem, not a media container, #64).
         // Gated on the disc-image extension so normal media URLs skip the range-probe entirely; if
         // the source is not a recognizable disc, fall through to the streaming reader.
-        if !isLive, Self.isDiscImageURL(url) {
-            let warm = HTTPDiscIOReader.takePrewarm(for: url, extraHeaders: extraHeaders)
-            if let discReader = try HTTPDiscIOReader.open(url: url, extraHeaders: extraHeaders, prewarmed: warm) {
-                adoptOwnedSourceReader(discReader)
-                if isCloseRequested {
-                    releaseOwnedSourceReader()
-                    throw DemuxerError.openFailed(code: -1)
-                }
-                let discInfo: DiscInfo?
+        if !isLive, Self.isDASHManifestURL(url) {
+            try openDASH(manifestURL: url, extraHeaders: extraHeaders)
+            return
+        }
+        let triedDisc = !isLive && Self.isDiscImageURL(url)
+        if triedDisc {
+            if try openHTTPDiscImage(url: url, extraHeaders: extraHeaders, selectTitleID: selectTitleID) { return }
+            DiscImageMediaType.forgetDiscImage(url)
+        }
+        do {
+            try openHTTPStream(url: url, extraHeaders: extraHeaders, isLive: isLive,
+                               routesDiscMediaType: !isLive && !triedDisc)
+        } catch AVIOReaderError.discImageMediaType {
+            // AE#860: an extensionless URL whose opening response declared a disc image. The type is
+            // only a hint; the disc readers confirm it, and a mislabelled body streams as before.
+            EngineLog.emit("[Demuxer] AE#860: the source declared a disc image type; trying the disc adapter", category: .demux)
+            if try openHTTPDiscImage(url: url, extraHeaders: extraHeaders, selectTitleID: selectTitleID) {
+                DiscImageMediaType.noteDiscImage(url)
+                return
+            }
+            EngineLog.emit("[Demuxer] AE#860: no disc structure behind the declared type; opening it as ordinary media", category: .demux)
+            try openHTTPStream(url: url, extraHeaders: extraHeaders, isLive: isLive, routesDiscMediaType: false)
+        }
+    }
+
+    /// Opens `url` through the disc adapter. False when the source is unreachable or is not a
+    /// recognizable disc, in which case any warm is back in the store for the streaming reader.
+    private func openHTTPDiscImage(url: URL, extraHeaders: [String: String], selectTitleID: Int?) throws -> Bool {
+        let warm = HTTPDiscIOReader.takePrewarm(for: url, extraHeaders: extraHeaders)
+        if let discReader = try HTTPDiscIOReader.open(url: url, extraHeaders: extraHeaders, prewarmed: warm) {
+            adoptOwnedSourceReader(discReader)
+            if isCloseRequested {
+                releaseOwnedSourceReader()
+                throw DemuxerError.openFailed(code: -1)
+            }
+            let discInfo: DiscInfo?
+            do {
+                discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString)
+            } catch {
+                releaseOwnedSourceReader()
+                if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+                throw error
+            }
+            if let discInfo {
+                adoptDiscInfo(discInfo)
+                auditSource = nil
+                let bridge = CustomIOReaderBridge(reader: discInfo.reader)
+                let inputFormat = av_find_input_format(discInfo.formatHint)
                 do {
-                    discInfo = try DiscReader.wrap(discReader, selectTitleID: selectTitleID, cacheKey: url.absoluteString)
+                    try openWithProvider(bridge, inputFormat: inputFormat, isLive: false)
                 } catch {
                     releaseOwnedSourceReader()
-                    if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
                     throw error
                 }
-                if let discInfo {
-                    adoptDiscInfo(discInfo)
-                    auditSource = nil
-                    let bridge = CustomIOReaderBridge(reader: discInfo.reader)
-                    let inputFormat = av_find_input_format(discInfo.formatHint)
-                    do {
-                        try openWithProvider(bridge, inputFormat: inputFormat, isLive: false)
-                    } catch {
-                        releaseOwnedSourceReader()
-                        throw error
-                    }
-                    return
-                }
-                releaseOwnedSourceReader()
+                return true
             }
-            // Not a disc: hand the warm back so the streaming reader below adopts it (#647).
-            if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+            releaseOwnedSourceReader()
         }
+        // Not a disc: hand the warm back so the streaming reader adopts it (#647).
+        if let warm { SourcePrewarmStore.shared.store(warm, for: url) }
+        return false
+    }
+
+    private func openHTTPStream(url: URL, extraHeaders: [String: String], isLive: Bool, routesDiscMediaType: Bool) throws {
         let reader = AVIOReader(
             url: url,
             extraHeaders: extraHeaders,
@@ -819,11 +857,53 @@ public final class Demuxer: @unchecked Sendable {
             heldConnection: openProfile.avioHeldConnection,
             sourceOpenPolicy: openProfile.sourceOpenPolicy,
             requestHeaderStore: openProfile.requestHeaders,
-            diagnosticContext: openProfile.diagnosticContext
+            diagnosticContext: openProfile.diagnosticContext,
+            routesDiscMediaType: routesDiscMediaType
         )
         reader.onNetworkPhaseChanged = onNetworkPhaseChanged
         reader.playIntentProvider = playIntentProvider
-        try openWithProvider(reader, isLive: isLive)
+        do {
+            try openWithProvider(reader, isLive: isLive)
+        } catch AVIOReaderError.dashManifest {
+            try openDASH(manifestURL: url, extraHeaders: extraHeaders)
+        }
+    }
+
+    /// AE#859: an MPEG-DASH manifest by URL extension, opened as DASH without a first look at the body.
+    static func isDASHManifestURL(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() == "mpd"
+    }
+
+    /// AE#859: opens an on-demand DASH manifest as the fragmented MP4 `DASHSourceOpener` lays it out.
+    /// The reader is engine-owned the way the remote disc reader is: the bridge does not own it, so it
+    /// is adopted here and closed with the demuxer.
+    private func openDASH(manifestURL url: URL, extraHeaders: [String: String]) throws {
+        let opener = DASHSourceOpener(manifestURL: url, headers: extraHeaders,
+                                      requestTimeout: max(openProfile.avioRequestTimeout, 10))
+        providerLock.lock()
+        pendingDASHOpener = opener
+        providerLock.unlock()
+        defer {
+            providerLock.lock()
+            pendingDASHOpener = nil
+            providerLock.unlock()
+        }
+        if isCloseRequested { throw DemuxerError.openFailed(code: -1) }
+        let reader = try opener.open()
+        adoptOwnedSourceReader(reader)
+        if isCloseRequested {
+            releaseOwnedSourceReader()
+            throw DemuxerError.openFailed(code: -1)
+        }
+        // The Dolby Vision record audit re-reads the source URL as a media file, which an MPD is not.
+        auditSource = nil
+        let bridge = CustomIOReaderBridge(reader: reader)
+        do {
+            try openWithProvider(bridge, inputFormat: av_find_input_format("mp4"), isLive: false)
+        } catch {
+            releaseOwnedSourceReader()
+            throw error
+        }
     }
 
     /// A provider that connected (or tried to) for an open that is not going to finish.
@@ -1091,8 +1171,10 @@ public final class Demuxer: @unchecked Sendable {
         reclassifyAttachedPictures(ctx)
         boundProbeForDeclaredDiscTitle(ctx)
         let parked = parkUnresolvableAudio(ctx)
+        let parkedPGS = parkPGSSubtitles(ctx)
         let findRet = avformat_find_stream_info(ctx, nil)
         unparkUnresolvableAudio(ctx, parked)
+        unparkPGSSubtitles(ctx, parkedPGS)
         guard findRet >= 0 else {
             emitOpenTimings(outcome: "find_stream_info failed (\(findRet))")
             throw DemuxerError.streamInfoFailed(code: findRet)
@@ -1188,6 +1270,43 @@ public final class Demuxer: @unchecked Sendable {
     private func unparkUnresolvableAudio(_ ctx: UnsafeMutablePointer<AVFormatContext>, _ parked: [Int]) {
         for i in parked where i < Int(ctx.pointee.nb_streams) {
             ctx.pointee.streams[i]?.pointee.codecpar?.pointee.codec_type = AVMEDIA_TYPE_AUDIO
+        }
+    }
+
+    /// Whether `find_stream_info` would chase this stream for a parameter playback never reads. (#858)
+    ///
+    /// `has_codec_parameters` fails a PGS stream until it knows a width, and only a decoded
+    /// presentation composition segment carries one. PGS is sparse (the first cue of a film can sit
+    /// minutes in), so a single such track holds the probe to its whole byte ceiling: 50 MiB and
+    /// ~14 s on the reported remote Matroska source with four of them. Nothing downstream needs that
+    /// width from the probe: `EmbeddedSubtitleDecoder` takes the canvas from the PCS it decodes and
+    /// falls back to the video size, the same footing the subtitle side reader has stood on since
+    /// it stopped probing at all (#87). The codec must already be known; `AV_CODEC_ID_NONE` is a
+    /// stream still being identified.
+    static func subtitleNeedsNoProbe(codecID: AVCodecID, codecType: AVMediaType) -> Bool {
+        codecType == AVMEDIA_TYPE_SUBTITLE && codecID == AV_CODEC_ID_HDMV_PGS_SUBTITLE
+    }
+
+    /// Park PGS tracks as ATTACHMENT for the duration of the probe, the lever `parkUnresolvableAudio`
+    /// uses, so the pass stops once audio and video are known. The restore follows the probe because
+    /// `find_stream_info` writes its context back over `codecpar`; the caller sees the same track it
+    /// would have after a full-budget probe that never met a cue, width 0. (#858)
+    private func parkPGSSubtitles(_ ctx: UnsafeMutablePointer<AVFormatContext>) -> [Int] {
+        var parked: [Int] = []
+        for i in 0..<Int(ctx.pointee.nb_streams) {
+            guard let codecpar = ctx.pointee.streams[i]?.pointee.codecpar,
+                  Self.subtitleNeedsNoProbe(codecID: codecpar.pointee.codec_id,
+                                            codecType: codecpar.pointee.codec_type)
+            else { continue }
+            codecpar.pointee.codec_type = AVMEDIA_TYPE_ATTACHMENT
+            parked.append(i)
+        }
+        return parked
+    }
+
+    private func unparkPGSSubtitles(_ ctx: UnsafeMutablePointer<AVFormatContext>, _ parked: [Int]) {
+        for i in parked where i < Int(ctx.pointee.nb_streams) {
+            ctx.pointee.streams[i]?.pointee.codecpar?.pointee.codec_type = AVMEDIA_TYPE_SUBTITLE
         }
     }
 
@@ -2487,11 +2606,59 @@ public final class Demuxer: @unchecked Sendable {
                 "[Demuxer] Seek to stream \(streamIndex) timestamp \(timestamp) failed: \(ret)",
                 category: .demux
             )
+        } else if let stream = ctx.pointee.streams[Int(streamIndex)],
+                  Self.forwardLandingCrossesUnreadFragment(ctx, stream: stream, timestamp: timestamp) {
+            // AE#859: a fragmented MP4 indexes only the fragments it has read. The forward search
+            // above loaded the fragment holding the target, but not the next one, so the first
+            // sync sample "at or after" the target was whatever fragment an earlier read had left
+            // in the index (measured: start at 150 s, seek to 52 s, landed at 116 s). Landing on
+            // the sync sample before the target costs at most that one fragment, which the
+            // producer's gate drops.
+            let back = avformat_seek_file(ctx, streamIndex, Int64.min, timestamp, timestamp, 0)
+            EngineLog.emit(
+                "[Demuxer] AE#859: forward seek on stream \(streamIndex) to \(timestamp) crossed an "
+                + "unread fragment; landed on the preceding sync sample instead (ret=\(back))",
+                category: .demux
+            )
         }
         avformat_flush(ctx)
         resetSubpictureAssembly()  // #651: libavformat just dropped the parsers this stands in for
         lastReadClipIdx = -1
         return ret >= 0
+    }
+
+    /// AE#859: whether the sync sample a forward seek to `timestamp` chose lies behind a hole in the
+    /// stream's sample index, which in a fragmented MP4 is a fragment nobody has read yet. Only the
+    /// mov demuxer builds its index fragment by fragment; every other container either indexes the
+    /// whole file at open or seeks without an index.
+    private static func forwardLandingCrossesUnreadFragment(
+        _ ctx: UnsafeMutablePointer<AVFormatContext>, stream: UnsafeMutablePointer<AVStream>,
+        timestamp: Int64
+    ) -> Bool {
+        guard let name = ctx.pointee.iformat?.pointee.name,
+              String(cString: name).split(separator: ",").contains("mov") else { return false }
+        let landing = av_index_search_timestamp(stream, timestamp, 0)
+        guard landing >= 0 else { return false }
+        let first = max(0, av_index_search_timestamp(stream, timestamp, AVSEEK_FLAG_BACKWARD | AVSEEK_FLAG_ANY))
+        guard landing > first else { return false }
+        var timestamps: [Int64] = []
+        timestamps.reserveCapacity(Int(landing - first) + 1)
+        for i in first...landing {
+            guard let entry = avformat_index_get_entry(stream, i) else { return false }
+            timestamps.append(entry.pointee.timestamp)
+        }
+        let tb = stream.pointee.time_base
+        guard tb.num > 0, tb.den > 0 else { return false }
+        let holeTicks = Int64(Double(tb.den) / Double(tb.num) * indexHoleSeconds)
+        return indexHasHole(timestamps, holeTicks: max(1, holeTicks))
+    }
+
+    /// Consecutive samples further apart than this are not neighbours: no real stream leaves half a
+    /// second between two pictures, while the shortest fragment a packager writes is about that long.
+    static let indexHoleSeconds = 0.5
+
+    static func indexHasHole(_ timestamps: [Int64], holeTicks: Int64) -> Bool {
+        zip(timestamps, timestamps.dropFirst()).contains { $1 &- $0 > holeTicks }
     }
 
     private func resetAfterTimeSeek(_ ctx: UnsafeMutablePointer<AVFormatContext>) {

@@ -5,11 +5,17 @@ Updated: 2026-10-28. Integration base: upstream 7.49.0
 
 ## Current differences
 
-None in the engine. The fork's source-failure diagnostics landed upstream as PR #818
+- Session callback release (2026-10-28, not yet upstream): the playlist shift relay
+  (`installPlaylistShiftRelay`) and the credential refusal relay (`relayCredentialRefusals`)
+  hold the session and the header store they are installed on weakly, so a stopped HLS session
+  and its store are released. Tests: `SessionCallbackReleaseTests`. Meant for an upstream pull
+  request.
+
+The fork's source-failure diagnostics landed upstream as PR #818
 (merge `aa0bf3b3bda200196b8ad0edaf7481a5fe12cc3a`, released in 7.48.0), including its
-second-review fix and the held HTTP/1 failing-hop follow-up. The tree matches 7.49.0;
-this file and `COPYING.GPL3` are the only additions. Fixes made here are generic and go
-upstream as pull requests.
+second-review fix and the held HTTP/1 failing-hop follow-up. Apart from the change above the
+tree matches 7.49.0; this file and `COPYING.GPL3` are the only additions. Fixes made here are
+generic and go upstream as pull requests.
 
 No app identity, provider credentials, routing policy or UI behavior is embedded.
 

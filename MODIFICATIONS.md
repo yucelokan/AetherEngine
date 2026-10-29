@@ -11,10 +11,14 @@ Updated: 2026-10-29. Integration base: upstream 7.51.0
   and its store are released. Tests: `SessionCallbackReleaseTests`. Merged upstream as PR #922
   (head `35e76666a8f2e375c2242151e807e4e3b5045fed`, same patch; merge
   `74f3a674d3cc18362a4d8c2f63e03f28259b9539`) after 7.51.0, so not yet in a release.
+- HLS byte-range segments (2026-10-29, not yet upstream): the ingest parser reads
+  `EXT-X-BYTERANGE` (RFC 8216 4.3.2.2) and the live and VOD ingest fetch each segment's sub-range
+  with a `Range` request, on the persistent HTTP/1.1 path as well; a 200 answer is cut to the
+  sub-range. Tests: `HLSByteRangeSegmentTests`. Meant for an upstream pull request.
 
 The fork's source-failure diagnostics landed upstream as PR #818
 (merge `aa0bf3b3bda200196b8ad0edaf7481a5fe12cc3a`, released in 7.48.0), including its
-second-review fix and the held HTTP/1 failing-hop follow-up. Apart from the change above the
+second-review fix and the held HTTP/1 failing-hop follow-up. Apart from the changes above the
 tree matches 7.51.0; this file and `COPYING.GPL3` are the only additions. Fixes made here are
 generic and go upstream as pull requests.
 

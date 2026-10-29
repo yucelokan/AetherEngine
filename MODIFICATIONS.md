@@ -13,8 +13,9 @@ Updated: 2026-10-29. Integration base: upstream 7.51.0
   `74f3a674d3cc18362a4d8c2f63e03f28259b9539`) after 7.51.0, so not yet in a release.
 - HLS byte-range segments (2026-10-29, not yet upstream): the ingest parser reads
   `EXT-X-BYTERANGE` (RFC 8216 4.3.2.2) and the live and VOD ingest fetch each segment's sub-range
-  with a `Range` request, on the persistent HTTP/1.1 path as well; a 200 answer is cut to the
-  sub-range. Tests: `HLSByteRangeSegmentTests`. Meant for an upstream pull request.
+  with a `Range` request, on the persistent HTTP/1.1 path as well, the VOD carriage probe
+  included; a 200 answer is cut to the sub-range and a short 206 is refused. Tests:
+  `HLSByteRangeSegmentTests`. Open upstream as PR #928 (commits `341aa70a` and `ade3dda5`).
 
 The fork's source-failure diagnostics landed upstream as PR #818
 (merge `aa0bf3b3bda200196b8ad0edaf7481a5fe12cc3a`, released in 7.48.0), including its

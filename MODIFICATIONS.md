@@ -1,20 +1,21 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-28. Integration base: upstream 7.49.0
-(`fe96b19566fcff9910d3b8e1f8045587e497c1d6`).
+Updated: 2026-10-29. Integration base: upstream 7.51.0
+(`a877941bd3402d5f531edad0cbe4c9b33eefa856`).
 
 ## Current differences
 
-- Session callback release (2026-10-28, not yet upstream): the playlist shift relay
+- Session callback release (2026-10-28): the playlist shift relay
   (`installPlaylistShiftRelay`) and the credential refusal relay (`relayCredentialRefusals`)
   hold the session and the header store they are installed on weakly, so a stopped HLS session
-  and its store are released. Tests: `SessionCallbackReleaseTests`. Meant for an upstream pull
-  request.
+  and its store are released. Tests: `SessionCallbackReleaseTests`. Merged upstream as PR #922
+  (head `35e76666a8f2e375c2242151e807e4e3b5045fed`, same patch; merge
+  `74f3a674d3cc18362a4d8c2f63e03f28259b9539`) after 7.51.0, so not yet in a release.
 
 The fork's source-failure diagnostics landed upstream as PR #818
 (merge `aa0bf3b3bda200196b8ad0edaf7481a5fe12cc3a`, released in 7.48.0), including its
 second-review fix and the held HTTP/1 failing-hop follow-up. Apart from the change above the
-tree matches 7.49.0; this file and `COPYING.GPL3` are the only additions. Fixes made here are
+tree matches 7.51.0; this file and `COPYING.GPL3` are the only additions. Fixes made here are
 generic and go upstream as pull requests.
 
 No app identity, provider credentials, routing policy or UI behavior is embedded.
@@ -57,7 +58,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.49.0 integration.
+and is included in the current 7.51.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

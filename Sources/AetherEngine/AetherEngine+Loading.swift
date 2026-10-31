@@ -425,6 +425,12 @@ extension AetherEngine {
                 // Feed the playhead mirror the remote-HLS audio tap (#95) reads off its ingest task;
                 // shift 0 on this path, so the rendered position is the source-PTS playhead.
                 self.renderedPositionMirror.set(value)
+                self.refreshRemoteHLSBufferedPosition(rendered: value, ranges: host.loadedVideoRanges)
+            }
+            .store(in: &nativeCancellables)
+        host.$loadedVideoRanges
+            .sink { [weak self] ranges in
+                self?.refreshRemoteHLSBufferedPosition(rendered: host.renderedTime, ranges: ranges)
             }
             .store(in: &nativeCancellables)
         // #168: mirror the item's parsed dynamic range into the published format AND program the panel.
@@ -928,6 +934,7 @@ extension AetherEngine {
         session.requestHeaders = sessionRequestHeaders
         // AE#464: every producer this session builds reads it off the session. Set before start().
         session.audioDelaySeconds = loadedOptions.audioDelaySeconds
+        session.audioShaping = loadedOptions.audioShaping
         session.servesSegmentsProgressively = loadedOptions.progressiveSegmentDelivery
         // #240: the pump claims the source link through this gate while it is fetching, so the
         // subtitle side readers can stay out of its way. Set before start().
@@ -2018,12 +2025,17 @@ extension AetherEngine {
         // on every build. Without it a software host came up aspect-fit whatever the app had set,
         // and only a second write mid-session took effect.
         let host = SoftwarePlaybackHost(videoGravity: _videoGravity)
+        let upscaleRebuild = UpscaleRouteDecision.forRebuild(
+            sessionPlan: sourceUpscalePlan, optionOn: loadedOptions.upscalesLowResolutionVideo,
+            disabled: sourceUpscaleDisabled)
         host.configuredDVProfile = sourceDVProfile
         host.dolbyVisionHandling = loadedOptions.dolbyVisionHandling
         host.preferDualLayerDolbyVision = loadedOptions.preferDualLayerDolbyVision
+        host.upscalePlan = upscaleRebuild.plan
         host.elType = elType ?? sourceElType
         host.objectAudioRendering = loadedOptions.objectAudioRendering
         host.setAudioDelay(loadedOptions.audioDelaySeconds)   // AE#464: before the decoder opens
+        host.audioShaping = loadedOptions.audioShaping        // AE#923: likewise
         if isLive { host.liveEdgeCushionSeconds = loadedOptions.liveEdgeCushionSeconds }
         // AE#813: a live ingest delivers whole segments, and the host's holdback follows their length.
         if isLive, let ingest = customReader as? LiveIngestSourceInfo {
@@ -2230,6 +2242,8 @@ extension AetherEngine {
             host.stop()
             try checkLoadCurrent(generation)
         }
+        if let status = upscaleRebuild.status { activeUpscale = status }
+        wireUpscaleStatus(from: host)
         // The audio route is settled by `load`: an object-audio one keeps the HDMI link in Atmos.
         followAtmosOutput()
     }
@@ -2246,6 +2260,7 @@ extension AetherEngine {
         await activateRendererAudioSession(audioSourceStreamIndex: audioSourceStreamIndex)
         try checkLoadCurrent(generation)
         let host = AudioPlaybackHost()
+        host.audioShaping = loadedOptions.audioShaping
         self.audioHost = host
         applyDesiredVolume(to: host)
         applyDesiredRate(to: host)
@@ -3027,8 +3042,24 @@ extension AetherEngine {
 extension AetherEngine {
     /// A paused picture does not tick, but the native segment cache can still grow or evict.
     func refreshNativeBufferedPosition() {
-        guard nativeVideoSession != nil, let host = nativeHost else { return }
-        refreshNativeBufferedPosition(playlistSeconds: host.renderedTime)
+        guard let host = nativeHost else { return }
+        if nativeVideoSession != nil {
+            refreshNativeBufferedPosition(playlistSeconds: host.renderedTime)
+        } else {
+            refreshRemoteHLSBufferedPosition(rendered: host.renderedTime, ranges: host.loadedVideoRanges)
+        }
+    }
+
+    /// AE#935: no engine cache on the bypass, so the frontier is AVPlayer's own contiguous loaded
+    /// range. Item axis with shift 0, the axis `currentTime` is published on here. Takes the values
+    /// rather than the host because a `@Published` sink runs before the host's property is set.
+    /// Guarded by route because a reroute to loopback keeps the host and only drops these sinks
+    /// after its first await.
+    func refreshRemoteHLSBufferedPosition(rendered: Double, ranges: [(Double, Double)]) {
+        guard videoRoute == .remoteBypass else { return }
+        let anchor = pendingRecoverySeekClockTarget ?? rendered
+        let end = NativeAVPlayerHost.contiguousBufferedEnd(ranges: ranges, now: anchor)
+        clock.bufferedPosition = max(clock.currentTime, end)
     }
 }
 

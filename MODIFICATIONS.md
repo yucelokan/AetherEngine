@@ -1,27 +1,20 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-29. Integration base: upstream 7.51.0
-(`a877941bd3402d5f531edad0cbe4c9b33eefa856`).
+Updated: 2026-10-31. Integration base: upstream 7.53.1
+(`0839aeee18dd0818c5c307a3c5ecba8ea3161b22`).
 
 ## Current differences
 
-- Session callback release (2026-10-28): the playlist shift relay
-  (`installPlaylistShiftRelay`) and the credential refusal relay (`relayCredentialRefusals`)
-  hold the session and the header store they are installed on weakly, so a stopped HLS session
-  and its store are released. Tests: `SessionCallbackReleaseTests`. Merged upstream as PR #922
-  (head `35e76666a8f2e375c2242151e807e4e3b5045fed`, same patch; merge
-  `74f3a674d3cc18362a4d8c2f63e03f28259b9539`) after 7.51.0, so not yet in a release.
-- HLS byte-range segments (2026-10-29, not yet upstream): the ingest parser reads
-  `EXT-X-BYTERANGE` (RFC 8216 4.3.2.2) and the live and VOD ingest fetch each segment's sub-range
-  with a `Range` request, on the persistent HTTP/1.1 path as well, the VOD carriage probe
-  included; a 200 answer is cut to the sub-range and a short 206 is refused. Tests:
-  `HLSByteRangeSegmentTests`. Open upstream as PR #928 (commits `341aa70a` and `ade3dda5`).
+None in the engine. The tree matches 7.53.1; this file and `COPYING.GPL3` are the only
+additions. Fixes made here are generic and go upstream as pull requests.
+
+Released upstream since the previous integration: the session callback release (PR #922, merge
+`74f3a674d3cc18362a4d8c2f63e03f28259b9539`, in 7.52.0) and HLS byte-range segments (PR #928,
+merge `a1a6508b`, in 7.53.0).
 
 The fork's source-failure diagnostics landed upstream as PR #818
 (merge `aa0bf3b3bda200196b8ad0edaf7481a5fe12cc3a`, released in 7.48.0), including its
-second-review fix and the held HTTP/1 failing-hop follow-up. Apart from the changes above the
-tree matches 7.51.0; this file and `COPYING.GPL3` are the only additions. Fixes made here are
-generic and go upstream as pull requests.
+second-review fix and the held HTTP/1 failing-hop follow-up.
 
 No app identity, provider credentials, routing policy or UI behavior is embedded.
 
@@ -63,7 +56,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.51.0 integration.
+and is included in the current 7.53.1 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

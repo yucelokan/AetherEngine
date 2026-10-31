@@ -60,7 +60,7 @@ extension AetherEngine {
     func wireUpscaleStatus(from host: SoftwarePlaybackHost) {
         #if !targetEnvironment(simulator)
         guard #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *),
-              let upscaler = host.frameUpscaler as? FrameUpscaler, let plan = host.upscalePlan else { return }
+              let upscaler = host.frameUpscaler as? DeferredFrameUpscaler, let plan = host.upscalePlan else { return }
         // Weak both ways: the host owns the stage, which owns this handler.
         upscaler.onEvent = { [weak self, weak host] event in
             Task { @MainActor in

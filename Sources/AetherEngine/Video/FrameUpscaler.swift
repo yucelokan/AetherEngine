@@ -428,6 +428,68 @@ final class FrameUpscaler: @unchecked Sendable {
     }
 }
 
+// MARK: - Building off the main actor
+
+/// The stage of one load, built on a background queue. The software host's load runs on the main actor and
+/// the build compiles the colour kernels, then creates the MetalFX scaler and starts the VT session: 460 ms
+/// on an M5 Max with cold caches, 22 ms warm, and the likely cause of a 3 s main-thread gap on an iPhone's
+/// first load. Frames pass through until the stage is ready, so playback starts at once and sharpens after.
+@available(tvOS 26, iOS 26, macOS 26, visionOS 26, *)
+final class DeferredFrameUpscaler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stage: FrameUpscaler?
+    private var handler: (@Sendable (FrameUpscaler.Event) -> Void)?
+    private var framesPassed = 0
+
+    convenience init(plan: UpscalePlan, frameInterval: Double) {
+        self.init { FrameUpscaler(plan: plan, frameInterval: frameInterval) }
+    }
+
+    /// `build` logs its own failure; frames then keep passing through.
+    init(build: @escaping @Sendable () -> FrameUpscaler?) {
+        let start = DispatchTime.now().uptimeNanoseconds
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard self != nil, let built = build() else { return }
+            self?.install(built, since: start)
+        }
+    }
+
+    private func install(_ built: FrameUpscaler, since start: UInt64) {
+        lock.lock()
+        built.onEvent = handler
+        stage = built
+        let passed = framesPassed
+        lock.unlock()
+        EngineLog.emit(String(format: "[Upscale] stage ready in %.0f ms, %d frames passed through",
+                              elapsedMs(since: start), passed), category: .swPlayback)
+    }
+
+    var isReady: Bool { lock.lock(); defer { lock.unlock() }; return stage != nil }
+
+    /// Reaches the stage whenever it is built, so no event of its can be missed.
+    var onEvent: (@Sendable (FrameUpscaler.Event) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return handler }
+        set { lock.lock(); handler = newValue; stage?.onEvent = newValue; lock.unlock() }
+    }
+
+    var delivered: (plan: UpscalePlan, degraded: Bool)? { builtStage?.delivered }
+
+    var disabledReason: String? { builtStage?.disabledReason }
+
+    func upscale(_ input: CVPixelBuffer, pts: CMTime) -> CVPixelBuffer? {
+        lock.lock()
+        guard let stage else {
+            framesPassed += 1
+            lock.unlock()
+            return nil
+        }
+        lock.unlock()
+        return stage.upscale(input, pts: pts)
+    }
+
+    private var builtStage: FrameUpscaler? { lock.lock(); defer { lock.unlock() }; return stage }
+}
+
 // MARK: - Process-wide MetalFX cost
 
 /// MetalFX overruns seen in this process: a stage whose MetalFX output is at least as large as a recorded

@@ -5,8 +5,10 @@ Updated: 2026-10-31. Integration base: upstream 7.53.1
 
 ## Current differences
 
-None in the engine. The tree matches 7.53.1; this file and `COPYING.GPL3` are the only
-additions. Fixes made here are generic and go upstream as pull requests.
+One, generic and meant for an upstream pull request: the upscale stage builds off the main actor
+(`DeferredFrameUpscaler`), with frames passing through until it is ready. Everything else matches
+7.53.1; this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and
+go upstream as pull requests.
 
 Released upstream since the previous integration: the session callback release (PR #922, merge
 `74f3a674d3cc18362a4d8c2f63e03f28259b9539`, in 7.52.0) and HLS byte-range segments (PR #928,

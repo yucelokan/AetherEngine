@@ -10,7 +10,12 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The upscale stage no longer builds on the main actor (#846).** The software host built it while loading: the
+  colour kernels compile, MetalFX creates its scaler and VideoToolbox starts its session, 460 ms on an M5 Max with
+  cold caches and a likely 3 s stall on an iPhone's first load. It now builds on a background queue, frames pass
+  through until it is ready, and `[Upscale] stage ready in ...` logs how long that took and how many frames passed.
 
 ## [7.53.1] - 2026-10-31
 

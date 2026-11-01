@@ -440,18 +440,35 @@ final class DeferredFrameUpscaler: @unchecked Sendable {
     private var stage: FrameUpscaler?
     private var handler: (@Sendable (FrameUpscaler.Event) -> Void)?
     private var framesPassed = 0
+    private var buildFailed = false
+
+    static let unavailableReason = "stage unavailable"
 
     convenience init(plan: UpscalePlan, frameInterval: Double) {
         self.init { FrameUpscaler(plan: plan, frameInterval: frameInterval) }
     }
 
-    /// `build` logs its own failure; frames then keep passing through.
+    /// `build` logs its own failure; frames then keep passing through and the stage counts as disabled, so
+    /// the session gets the same way back to the native path as a stage that gave up while running.
     init(build: @escaping @Sendable () -> FrameUpscaler?) {
         let start = DispatchTime.now().uptimeNanoseconds
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard self != nil, let built = build() else { return }
-            self?.install(built, since: start)
+            guard self != nil else { return }
+            if let built = build() {
+                self?.install(built, since: start)
+            } else {
+                self?.noteBuildFailed()
+            }
         }
+    }
+
+    private func noteBuildFailed() {
+        lock.lock()
+        buildFailed = true
+        let handler = handler
+        lock.unlock()
+        handler?(.disabled(reason: Self.unavailableReason,
+                           stats: FrameUpscaler.Stats(framesUpscaled: 0, failures: 0, meanMs: 0, maxMs: 0)))
     }
 
     private func install(_ built: FrameUpscaler, since start: UInt64) {
@@ -474,7 +491,10 @@ final class DeferredFrameUpscaler: @unchecked Sendable {
 
     var delivered: (plan: UpscalePlan, degraded: Bool)? { builtStage?.delivered }
 
-    var disabledReason: String? { builtStage?.disabledReason }
+    var disabledReason: String? {
+        lock.lock(); defer { lock.unlock() }
+        return buildFailed ? Self.unavailableReason : stage?.disabledReason
+    }
 
     func upscale(_ input: CVPixelBuffer, pts: CMTime) -> CVPixelBuffer? {
         lock.lock()

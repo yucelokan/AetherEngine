@@ -1703,7 +1703,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // negotiation state didn't match (Vincent test 2026-05-26, HDR10 panel).
         let hdcpLevel: String? = nil
 
-        // 5. Normalize the HEVC config record shipped in init.mp4:
+        // 5. Normalize the HEVC / H.264 config record shipped in init.mp4 (H.264 only takes a), #938):
         //    a) numOfArrays=0 (DV P5 MP4 encoders shipping VPS/SPS/PPS per-IRAP, #19 Wandering Earth 2):
         //       rebuild the hvcC from in-band parameter sets, else the dvh1 sample entry fails CME -4.
         //    b) numOfArrays>0 but carrying non-parameter-set arrays (libx265's user-data SEI_PREFIX, AE#187):
@@ -1731,19 +1731,31 @@ public final class HLSVideoEngine: @unchecked Sendable {
             containerStereo: StereoVideoSignal.containerStereo(codecpar),
             systemPresentsStereo: stereoOnAnySystem || StereoVideoSignal.systemPresentsStereo
         )
-        let hevcExtradataOverride: [UInt8]?
+        let videoExtradataOverride: [UInt8]?
         if let normalized = framingNormalization.extradataOverride {
-            hevcExtradataOverride = normalized
+            videoExtradataOverride = normalized
         } else if let rebuilt = rebuildHEVCExtradataWithInBandParameterSets(
             demuxer: dem,
             videoStreamIndex: videoIndex,
             codecpar: codecpar,
             rewindBeforeScan: !isLiveSession
         ) {
-            hevcExtradataOverride = rebuilt
+            videoExtradataOverride = rebuilt
             EngineLog.emit(
                 "[HLSVideoEngine] rebuilt hvcC with in-band parameter sets: "
                 + "\(codecpar.pointee.extradata_size) B → \(rebuilt.count) B",
+                category: .session
+            )
+        } else if let rebuilt = rebuildH264ExtradataWithInBandParameterSets(
+            demuxer: dem,
+            videoStreamIndex: videoIndex,
+            codecpar: codecpar,
+            rewindBeforeScan: !isLiveSession
+        ) {
+            videoExtradataOverride = rebuilt
+            EngineLog.emit(
+                "[HLSVideoEngine] rebuilt avcC with in-band parameter sets: "
+                + "\(codecpar.pointee.extradata_size) B → \(rebuilt.count) B (#938)",
                 category: .session
             )
         } else if codecpar.pointee.codec_id == AV_CODEC_ID_HEVC,
@@ -1752,14 +1764,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
                   let canonical = Self.canonicalizeHEVCConfigRecord(
                       source, keepingSEIPayloadTypes: stereo.signal == .multiview
                           ? [Self.stereoReferenceDisplaysSEIPayloadType] : []) {
-            hevcExtradataOverride = canonical
+            videoExtradataOverride = canonical
             EngineLog.emit(
                 "[HLSVideoEngine] canonicalized hvcC (stripped non-parameter-set NAL arrays): "
                 + "\(source.count) B → \(canonical.count) B (AE#187)",
                 category: .session
             )
         } else {
-            hevcExtradataOverride = nil
+            videoExtradataOverride = nil
         }
 
         // 6. Reset demuxer cursor to 0 (cue prewarm moved it mid-file). Skipped for live
@@ -1925,7 +1937,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             doviConfig: doviConfig,
             convertP7ToProfile81: convertP7ToProfile81,
             colorOverride: p5ColorOverride,
-            extradataOverride: hevcExtradataOverride,
+            extradataOverride: videoExtradataOverride,
             nalFramingOverride: measuredVideoNALFraming,
             convertsAnnexBSamples: framingNormalization.convertsAnnexBSamples,
             nalFramingLatch: NALFramingLatch(confirmed: framingMeasuredLengthPrefixed),
@@ -2500,14 +2512,15 @@ public final class HLSVideoEngine: @unchecked Sendable {
         }
         // AE#682: decided before the routing below, because an I-frame rendition is one of the
         // reasons to serve a master at all.
+        let originIsSerial = sourceReopenableByURL
+            && OriginRequestBudget.shared.requiresSerialRequests(sourceURL)
         let iFrameCandidate = IFrameRenditionEligibility.candidate(.init(
             requested: iFramePlaylistRequested,
             isLive: isLiveSession,
             planBoundariesClaimRandomAccess: planBoundariesClaimRandomAccess,
             sequentialOrigin: sequentialOrigin,
             heldSourceConnection: openProfile.avioHeldConnection,
-            originIsSerial: sourceReopenableByURL
-                && OriginRequestBudget.shared.requiresSerialRequests(sourceURL),
+            originIsSerial: originIsSerial,
             isDiscSource: dem.isDiscSource,
             secondReaderAvailable: sourceReopenableByURL || customIFrameReader != nil,
             stillsUnavailable: !stillsAvailable))
@@ -2518,10 +2531,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
             planBoundariesClaimRandomAccess: planBoundariesClaimRandomAccess,
             sequentialOrigin: sequentialOrigin,
             heldSourceConnection: openProfile.avioHeldConnection,
-            originIsSerial: sourceReopenableByURL
-                && OriginRequestBudget.shared.requiresSerialRequests(sourceURL),
+            originIsSerial: originIsSerial,
             isDiscSource: dem.isDiscSource,
             secondReaderAvailable: sourceReopenableByURL)) == .served
+        // AE#937: an idle gap on a one-request origin is still a second reader's open and its ranges,
+        // and a rung read overcommits once the pump queues behind it.
         stillLadderEligible = !previewNeedsCompositor && stillsAvailable
             && IFrameRenditionEligibility.candidate(.init(
                 requested: true,
@@ -2529,7 +2543,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 planBoundariesClaimRandomAccess: planBoundariesClaimRandomAccess,
                 sequentialOrigin: sequentialOrigin,
                 heldSourceConnection: openProfile.avioHeldConnection,
-                originIsSerial: false,
+                originIsSerial: originIsSerial,
                 isDiscSource: dem.isDiscSource,
                 secondReaderAvailable: sourceReopenableByURL)) == .served
         stillLadderLock.lock()
@@ -3253,6 +3267,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             originInflight: origin?.inflight ?? 0,
             originWaiting: origin?.waiting ?? 0,
             originPaced: origin?.paced ?? false,
+            originSerial: OriginRequestBudget.shared.requiresSerialRequests(sourceURL),
             secondsSinceOriginRefusal: origin?.secondsSinceLastRefusal,
             secondsSinceSessionStart: Self.seconds(from: started, to: now),
             secondsSinceLastRung: sinceLast)
@@ -3369,12 +3384,20 @@ public final class HLSVideoEngine: @unchecked Sendable {
                 let origin = OriginRequestBudget.shared.snapshot(for: url)
                 return (origin?.inflight ?? 0) == 0 && (origin?.waiting ?? 0) == 0
                     && !(origin?.paced ?? false)
+                    && !OriginRequestBudget.shared.requiresSerialRequests(url)
             })
         let made = (keyframes, builder)
         stillLadderSource = made
         EngineLog.emit("[StillLadder] side reader ready (segments=\(plan.count), serial origin="
                        + "\(OriginRequestBudget.shared.requiresSerialRequests(url)))", category: .session)
         return made
+    }
+
+    /// AE#937: whether a restart replacing a wedged demuxer aborts the stuck read before the fresh
+    /// open instead of after it. Only a one-request origin pays for the overlap; elsewhere opening first
+    /// keeps the old demuxer usable when the reopen fails.
+    nonisolated static func abortsWedgedReadBeforeReopen(oldPumpExited: Bool, originSerial: Bool) -> Bool {
+        !oldPumpExited && originSerial
     }
 
     private nonisolated static func seconds(from earlier: DispatchTime, to later: DispatchTime) -> Double {
@@ -3838,6 +3861,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
             prod.onLiveSegmentSound = { [weak prov] index, first, last in
                 prov?.noteLiveSegmentSound(index: index, firstSeconds: first, lastSeconds: last)
+            }
+            prod.onLiveReadHead = { [weak prov] ptsSeconds in
+                prov?.noteLiveReadHead(ptsSeconds: ptsSeconds)
             }
             // AE#443: the runaway park has to sit above the window this session actually serves, or it
             // bounds the window instead of backstopping it, and its enforcement (a sleeping read
@@ -5165,6 +5191,13 @@ public final class HLSVideoEngine: @unchecked Sendable {
             // of seeking the demuxer that just failed.
             if !isLiveSession, sideAudioDemuxer == nil, let fresh = registerRestartReopenDemuxer(epoch: epoch) {
                 let reopenStart = DispatchTime.now()
+                // AE#937: on a one-request origin the wedged read holds the only slot, so the fresh
+                // open would wait it out and then overcommit. Abort it first; a failed reopen then
+                // leaves a closed demuxer, whose first read fails into the next #169 revive.
+                let abortedFirst = Self.abortsWedgedReadBeforeReopen(
+                    oldPumpExited: oldPumpExited,
+                    originSerial: OriginRequestBudget.shared.requiresSerialRequests(sourceURL))
+                if abortedFirst { dem.markClosed() }
                 do {
                     // .restartReopen: bounded find_stream_info budget; the FULL playback budget was
                     // the bulk of a 44 s wedge-reopen over WAN (#93 residual). The pass itself must
@@ -5192,7 +5225,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     EngineLog.emit(
                         "[HLSVideoEngine] restart at idx=\(idx): "
                         + (oldPumpExited ? "#169 suspect-dead demuxer" : "old producer wedged")
-                        + "; reopen failed (\(error)), reusing the demuxer",
+                        + "; reopen failed (\(error)), "
+                        + (abortedFirst ? "the aborted demuxer stays (one-request origin)" : "reusing the demuxer"),
                         category: .session
                     )
                 }

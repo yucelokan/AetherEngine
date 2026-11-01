@@ -1048,6 +1048,9 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
     // that never left loading ended at 120.00 and passed a check against the final time. Each tick
     // counts at most two seconds, so a drill's own seek forward is not mistaken for playback.
     var clockAdvance = 0.0
+    // Latched here: the verdict runs after stop(), which resets both.
+    var sawNativeVideo = false
+    var sawFirstFrame = false
     var previousTickTime: Double? = engine.currentTime
     for tick in 1...ticks {
         try? await Task.sleep(nanoseconds: 1_000_000_000)
@@ -1066,6 +1069,8 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
                           engine.bufferedPosition,
                           engine.duration)
         line += " rfd=\(engine.hasFirstFrameReadyForDisplay ? "y" : "n")"
+        sawFirstFrame = sawFirstFrame || engine.hasFirstFrameReadyForDisplay
+        sawNativeVideo = sawNativeVideo || (engine.playbackBackend == .native && engine.sourceVideoCodecName != nil)
         if let presentProbe {
             presentProbe.attachIfNeeded(engine.currentAVPlayerItem)
             line += " pres=\(presentProbe.drainTick())"
@@ -1622,6 +1627,13 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
         }
         print("VERDICT: clock did not advance (t=\(String(format: "%.2f", finalTime))s, "
               + "ran \(String(format: "%.2f", clockAdvance))s); transport stalled after load")
+        return 2
+    }
+    // #938: an init.mp4 the decoder cannot start from plays audio with a running clock and never
+    // presents a frame, which every check above passes.
+    if clockShouldRun, sawNativeVideo, !sawFirstFrame {
+        print("VERDICT: clock advanced \(String(format: "%.2f", clockAdvance))s but no video frame "
+              + "ever became ready for display (black picture)")
         return 2
     }
     if let audioSwitch {

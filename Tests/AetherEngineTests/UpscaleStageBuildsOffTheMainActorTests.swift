@@ -81,16 +81,39 @@ struct UpscaleStageBuildsOffTheMainActorTests {
 
     @MainActor
     @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
-    @Test func aStageThatCannotBeBuiltLeavesFramesAsDecoded() async throws {
+    @Test func aStageThatCannotBeBuiltLeavesFramesAsDecodedAndCountsAsDisabled() async throws {
+        let release = DispatchSemaphore(value: 0)
+        let upscaler = DeferredFrameUpscaler {
+            release.wait()
+            return nil
+        }
+        defer { release.signal() }
+        let disabledReasons = Mutex<[String]>([])
+        upscaler.onEvent = { event in
+            if case let .disabled(reason, _) = event { disabledReasons.withLock { $0.append(reason) } }
+        }
+        #expect(upscaler.disabledReason == nil)
+
+        release.signal()
+        try await waitFor { upscaler.disabledReason != nil }
+        #expect(upscaler.disabledReason == DeferredFrameUpscaler.unavailableReason)
+        #expect(disabledReasons.withLock { $0 } == [DeferredFrameUpscaler.unavailableReason])
+        #expect(upscaler.upscale(try frame(), pts: .zero) == nil)
+        #expect(!upscaler.isReady)
+    }
+
+    @MainActor
+    @available(macOS 26, iOS 26, tvOS 26, visionOS 26, *)
+    @Test func aFailedBuildBeforeTheEngineWiresTheStageIsCaughtUp() async throws {
         let attempted = Mutex(false)
         let upscaler = DeferredFrameUpscaler {
             attempted.withLock { $0 = true }
             return nil
         }
-        try await waitFor { attempted.withLock { $0 } }
-        #expect(upscaler.upscale(try frame(), pts: .zero) == nil)
-        #expect(!upscaler.isReady)
-        #expect(upscaler.disabledReason == nil)
+        try await waitFor { upscaler.disabledReason != nil }
+        #expect(attempted.withLock { $0 })
+        // What `wireUpscaleStatus` reads after setting its handler.
+        #expect(upscaler.disabledReason == DeferredFrameUpscaler.unavailableReason)
     }
 
     @MainActor

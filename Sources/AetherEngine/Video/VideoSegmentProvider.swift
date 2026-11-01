@@ -1040,6 +1040,8 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     /// AE#443: the window-clamp line is a statement about the session, so it is made once.
     private var _loggedLiveWindowClamp = false
     private static let liveRecentDurationSampleCount = 20
+    /// AE#936: where the cutter is reading inside the open live segment. Guarded by stateLock.
+    private var _liveReadHead = LiveReadHead()
     /// One-shot latch for `noteWindowSlideRelativeToConsumer`. Guarded by stateLock.
     private var _liveConsumerOutsideWindowLatched = false
 
@@ -3051,7 +3053,24 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
                 degradedGrace = grace
                 degradedDeadline = Date().addingTimeInterval(grace)
             }
+            // AE#936: after a burst on a long GOP the next keyframe is further off than the grace, so
+            // waiting it out serves the same window later.
+            if let degradedDeadline, let degradedGrace,
+               hasBoundedStartupMedia(snap),
+               fastZapGraceIsFutile(remainingSeconds: degradedDeadline.timeIntervalSinceNow) {
+                let sealed = sealLiveTargetDuration(target)
+                let spentGrace = degradedGrace - max(0, degradedDeadline.timeIntervalSinceNow)
+                accountForFirstServe(
+                    since: enteredAt, snapshot: snap, targetDuration: sealed,
+                    note: "fastZap bounded start, \(LiveEdgePolicy.seconds(degradedGrace))s grace ended after "
+                        + "\(LiveEdgePolicy.seconds(spentGrace))s: next keyframe out of reach"
+                )
+                return true
+            }
             var effectiveDeadline = degradedDeadline.map { min(deadline, $0) } ?? deadline
+            if degradedDeadline != nil {
+                effectiveDeadline = min(effectiveDeadline, Date().addingTimeInterval(Self.graceReadHeadPollSeconds))
+            }
             // AE#684: a join becomes spent when the cutter parks on an empty reader, which is no
             // event this condition hears. While that is still to come, look again shortly.
             if spent == false {
@@ -3110,6 +3129,36 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
 
     /// How often the gate asks an ingest whether its join is spent. Well under a frame of start latency.
     static let joinSpentPollSeconds: TimeInterval = 0.025
+    /// AE#936: how often a running fastZap grace re-reads the read head, which signals no condition.
+    static let graceReadHeadPollSeconds: TimeInterval = 0.05
+
+    /// AE#936: the cutter read a video packet at `ptsSeconds` (the axis `appendLiveSegment` starts use).
+    func noteLiveReadHead(ptsSeconds: Double) {
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+        stateLock.lock()
+        _liveReadHead.note(ptsSeconds: ptsSeconds, at: now)
+        stateLock.unlock()
+    }
+
+    /// AE#936: whether the rest of a running fastZap grace can still finalize a segment.
+    private func fastZapGraceIsFutile(remainingSeconds: TimeInterval) -> Bool {
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let last = segments.last,
+              let head = _liveReadHead.latestPtsSeconds,
+              let shortest = segments.map(\.durationSeconds).min() else { return false }
+        return LiveEdgePolicy.fastZapGraceIsFutile(
+            openSegmentSeconds: head - (last.startSeconds + last.durationSeconds),
+            shortestSegmentSeconds: shortest,
+            deliveryRate: _liveReadHead.deliveryRate(
+                now: now,
+                window: LiveEdgePolicy.graceRateWindowSeconds,
+                minimumSpan: LiveEdgePolicy.graceRateMinimumSpanSeconds
+            ),
+            remainingGraceSeconds: remainingSeconds
+        )
+    }
 
     /// AE#374: one account per live session, emitted at whichever exit ends the first-serve gate.
     ///

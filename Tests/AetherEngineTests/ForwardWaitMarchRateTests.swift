@@ -8,6 +8,7 @@ import Foundation
 /// 23.6 s while a restart at the target resumed in 4.3 to 4.9 s on the same session (Apple TV 4K,
 /// 74 Mbps link, 71.5 Mbps remux, ~4.1 s segments). The provider now waits only while the measured
 /// march reaches the target sooner than a restart would.
+@Suite(.offCooperativePool)
 struct ForwardWaitMarchRateTests {
 
     private final class Recorder: @unchecked Sendable {
@@ -274,7 +275,7 @@ struct ForwardWaitMarchRateTests {
     /// has declared its target, never on a timer: two presses that swapped under a full parallel run made
     /// the earlier index a backward jump, which restarts on its own.
     @Test("a burst restarts for its first press and then only for the last target",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(2)))
     func burstRestartsOnlyForTheLastTarget() async throws {
         let cache = makeCache()
         defer { cache.close() }
@@ -282,8 +283,10 @@ struct ForwardWaitMarchRateTests {
         let recorder = Recorder()
         // The settle and the burst window outlast the whole burst, so every later press is still settling
         // when the next arrives, and a press delayed by a loaded runner still counts as part of the burst.
+        // A 2 s settle ran out between two presses on CI (65 restarted); the presses settle in parallel,
+        // so the longer settle costs the run about one settle.
         let provider = makeProvider(cache: cache, recorder: recorder, producerBase: 0, initialRestartIndex: 0,
-                                    settle: 2.0, burstWindow: 30.0)
+                                    settle: 10.0, burstWindow: 60.0)
         recordSlowMarch(provider, 53...60)
         _ = provider.mediaSegment(at: 60)
 

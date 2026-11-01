@@ -1,13 +1,14 @@
 # Fork provenance and modification history
 
-Updated: 2026-10-31. Integration base: upstream 7.53.1
-(`0839aeee18dd0818c5c307a3c5ecba8ea3161b22`).
+Updated: 2026-11-01. Integration base: upstream 7.54.0
+(`ee5027c69a27aae97ed852ded0d1151d5d225c34`).
 
 ## Current differences
 
 One, generic and meant for an upstream pull request: the upscale stage builds off the main actor
-(`DeferredFrameUpscaler`), with frames passing through until it is ready. Everything else matches
-7.53.1; this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and
+(`DeferredFrameUpscaler`), with frames passing through until it is ready, and a stage that cannot be
+built counts as disabled, so it gets the 7.54.0 way back to the native path. Everything else matches
+7.54.0; this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and
 go upstream as pull requests.
 
 Released upstream since the previous integration: the session callback release (PR #922, merge
@@ -58,7 +59,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.53.1 integration.
+and is included in the current 7.54.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

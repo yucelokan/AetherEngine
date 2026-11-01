@@ -24,6 +24,11 @@ extension SubtitleForwardPrefetcher {
 }
 
 extension AetherEngine {
+    /// AE#937: the readers open a second demuxer with its own pump, which a one-request origin does
+    /// not allow. A custom source's clone reads through the host's reader, not the origin budget.
+    nonisolated static func nativeSubtitleReadersAllowed(isCustomSource: Bool, originSerial: Bool) -> Bool {
+        isCustomSource || !originSerial
+    }
 
     // MARK: - Channel routing
 
@@ -400,7 +405,10 @@ extension AetherEngine {
         // loop, and it is exactly the stretch a landing claim rests on: the ground between a set
         // decoded behind the playhead and the playhead itself. Its lookahead beyond the playhead
         // comes from the packets it harvests, which the store notes as it takes them.
-        sessionStore?.noteHarvestReach(.pump, through: playhead)
+        // #941: not while a seek is in flight. `sourceTime` still reports the frame the seek is
+        // leaving, while the producer may already be re-anchored behind it, so the claim would
+        // stretch the fresh run across the very ground its restart skipped and blind the hole hold.
+        if !isSeeking { sessionStore?.noteHarvestReach(.pump, through: playhead) }
         // #271: wall time since the previous tick, so a tick that itself ran long cannot be read as
         // a seek by the next one. See SubtitleOverlayDrainer.drainPlan.
         let tickUptime = Double(DispatchTime.now().uptimeNanoseconds) / 1_000_000_000
@@ -499,14 +507,20 @@ extension AetherEngine {
             var gapHoldSequence: UInt64 = 0
             var gapHoldTicksLeft = 0
             let held = subtitleDrainCursors[channel]
-            // The playhead catching up to the hold ends it whatever the budget says: from there on
-            // the island is what the viewer is about to need, and waiting would dark the overlay
-            // for content that IS stored. That, not the tick budget, is the real bound.
-            if let heldAt = held?.harvestGapAt, heldAt >= playhead,
+            // #941: the ledger sees the holes order cannot, a forward re-anchor's above all.
+            let isRead = store.harvestReadCheck()
+            // The playhead closing on the island ends the hold whatever the budget says: from there
+            // on the island is what the viewer is about to need, and waiting would dark the overlay
+            // for content that IS stored. That, not the tick budget, is the real bound. #941: the
+            // island, not the hold position, which a refill at about 1x passes while the hole is
+            // still ahead of the playhead.
+            let releaseAt = playhead + Self.subtitleDrainHarvestGapReleaseLeadSeconds
+            if let heldAt = held?.harvestGapAt, let farSide = entries.first?.ptsSeconds, farSide > releaseAt,
                (held?.harvestGapTicksLeft ?? 0) > 0, !isReset,
                !SubtitleOverlayDrainer.harvestGapHoldResumes(
                 firstSequence: entries.first?.sequence,
-                heldSequence: held?.harvestGapSequence ?? 0) {
+                heldSequence: held?.harvestGapSequence ?? 0,
+                firstPts: farSide, heldAt: heldAt, isRead: isRead) {
                 // Still waiting: the window past the hold begins with the same island as before.
                 decodeEnd = 0
                 gapHoldAt = heldAt
@@ -517,7 +531,7 @@ extension AetherEngine {
                 ptsAt: { entries[$0].ptsSeconds },
                 sequenceAt: { entries[$0].sequence },
                 resumeFrom: isReset ? nil : held.map { ($0.lastDecodedPts, $0.lastDecodedSequence) },
-                notBefore: playhead), held?.harvestGapAt != cut.at || (held?.harvestGapTicksLeft ?? 0) > 0 {
+                notBefore: releaseAt, isRead: isRead), held?.harvestGapAt != cut.at || (held?.harvestGapTicksLeft ?? 0) > 0 {
                 decodeEnd = cut.index
                 gapHoldAt = cut.at
                 gapHoldSequence = cut.sequence
@@ -1008,7 +1022,7 @@ extension AetherEngine {
         // claim. Stated even when the positioning fell back or failed: what the loop then reads is
         // still forwards from wherever it sits, and the anchor is the earliest it can be.
         store.noteHarvestAnchor(.prefetch, at: startAt)
-        if landed != .seek {
+        if landed != .seek, !Task.isCancelled {  // AE#944: a cancelled session's positioning is noise
             EngineLog.emit(
                 "[AetherEngine] #151 forward prefetch seek to \(String(format: "%.2f", startAt))s timed out "
                 + "or failed; byte-estimate fallback \(landed == .byteEstimate ? "applied" : "unavailable")",
@@ -1894,6 +1908,13 @@ extension AetherEngine {
     func startNativeSubtitleReaders(url: URL, stores: [NativeSubtitleCueStore],
                                     readToEOF: Bool = false, startAtSeconds: Double? = nil) {
         cancelNativeSubtitleReaders()
+        guard Self.nativeSubtitleReadersAllowed(
+            isCustomSource: isCustomSource,
+            originSerial: OriginRequestBudget.shared.requiresSerialRequests(url)) else {
+            EngineLog.emit("[AetherEngine] AE#937 native subtitle readers skipped: one-request origin, "
+                           + "the pump tap covers the produced region", category: .engine)
+            return
+        }
         nativeSubtitleReadersRunToEOF = readToEOF
         var pairs: [(streamIndex: Int32, store: NativeSubtitleCueStore)] = []
         for (ordinal, entry) in nativeSubtitleTrackTable.enumerated() {

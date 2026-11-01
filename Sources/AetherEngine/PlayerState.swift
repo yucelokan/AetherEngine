@@ -374,20 +374,23 @@ public enum LiveJoinProfile: Sendable, Equatable {
     /// Channel-zapping profile: cut live segments at every keyframe past 0.5s, so TARGETDURATION and
     /// holdback collapse to the source keyframe cadence. The first playlist prefers the full holdback,
     /// but after two finalized segments a strict-realtime source gets one observed-segment grace,
-    /// clamped to 0.5...2.0s, before a shallow first window is served. That bounded start can produce
-    /// one early -16832 warning or a short rebuffer.
+    /// clamped to 0.5...2.0s, before a shallow first window is served. The grace ends early once the
+    /// source reads at 1x and the open segment cannot reach its keyframe within it (AE#936). That
+    /// bounded start can produce one early -16832 warning or a short rebuffer.
     case fastZap
 }
 
 /// Options for `AetherEngine.load(url:options:)`. All flags default to safe values.
-/// Which playback host serves a session's video (#461). See `LoadOptions.preferredDecodePath`.
+/// Which playback host serves a session's video (#461), or an audio-only session's audio. See
+/// `LoadOptions.preferredDecodePath`.
 public enum DecodePath: String, Sendable, Equatable, CaseIterable {
     /// The engine routes: codec support, the VideoToolbox capability probe, declared interlace,
     /// source seekability. The default, and right for every session that does not have evidence
     /// the engine cannot have.
     case automatic
-    /// Serve this source through `SoftwarePlaybackHost`, whatever the routing concluded. Scoped to
-    /// the session; it does not touch any other session on the shared engine.
+    /// Serve this source through `SoftwarePlaybackHost` (`AudioPlaybackHost` on an `audioOnly`
+    /// session), whatever the routing concluded. Scoped to the session; it does not touch any other
+    /// session on the shared engine.
     case software
 }
 
@@ -1036,6 +1039,9 @@ public struct LoadOptions: Sendable, Equatable {
     /// green/purple, and a demuxed-audio live source still fails rather than playing silent.
     /// `nativeRemoteHLS` is a different route entirely (AVPlayer plays the remote playlist, nothing
     /// is demuxed), so this has nothing to act on there and the engine says so in the log.
+    ///
+    /// On an `audioOnly` session `.software` sends a codec AVPlayer could play to the FFmpeg host
+    /// (`AudioPlaybackHost`) instead of `AudioAVPlayerHost`.
     public var preferredDecodePath: DecodePath = .automatic
 
     /// Whether a native session AVPlayer refuses on its merits may be rebuilt on the software path

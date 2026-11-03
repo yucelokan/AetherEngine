@@ -3828,6 +3828,43 @@ public final class AetherEngine: ObservableObject {
         return true
     }
 
+    /// How long the #287 in-place re-seek may take before the end is accepted (AE#962). The seek
+    /// targets a position whose segments are resident, so it lands in well under a second when it can
+    /// land at all; the reporter's session waited on one for over two minutes behind a black picture.
+    nonisolated static let prematureEndRecoverySeekDeadlineSeconds: Double = 20
+
+    enum PrematureEndRecoveryOutcome: Equatable {
+        /// The re-seek landed: resume playback into the tail.
+        case resume
+        /// A newer seek replaced it: that seek owns the transport, and the item has not ended.
+        case yield
+        /// It timed out or did not reach the target: the end stands, one bounded seek later.
+        case acceptEnd
+    }
+
+    nonisolated static func prematureEndRecoveryOutcome(landed: Bool, superseded: Bool) -> PrematureEndRecoveryOutcome {
+        if superseded { return .yield }
+        return landed ? .resume : .acceptEnd
+    }
+
+    /// How recently the published clock must have reached its peak for `prematureEndPlayhead` to
+    /// trust it over AVPlayer's reading (AE#962). The snap-back it guards against lands two observer
+    /// ticks (0.2 s) before the end notification.
+    nonisolated static let prematureEndPeakMaxAgeSeconds: Double = 1.0
+
+    /// The playhead a `didPlayToEndTime` is judged at (AE#962). A session that joined inside an
+    /// audio-only tail never loaded a video sample, and at the REAL end AVPlayer publishes its clock
+    /// back at the end of the video track (measured: 126.9 s, then 60.000 and 60.008 at rate 1.0, then
+    /// the notification), so the item, the player and the observer all read a position a whole tail
+    /// short of the end. `peak` is the highest clock published since the last seek: reached moments
+    /// ago, it is where playback actually was. A peak from before an external backward scrub is old
+    /// by the time the item ends, and is ignored.
+    nonisolated static func prematureEndPlayhead(read: Double, peak: Double?, peakAgeSeconds: Double?) -> Double {
+        guard let peak, let peakAgeSeconds, peak.isFinite, peak > read,
+              peakAgeSeconds <= prematureEndPeakMaxAgeSeconds else { return read }
+        return peak
+    }
+
     /// Complete a native VOD that parked a hair short of its advertised duration because the final
     /// segment's video is exhausted (AetherEngine#169): the final segment's EXTINF, derived from the
     /// container duration, overshoots the last real video sample, so AVPlayer sits in
@@ -3908,6 +3945,10 @@ public final class AetherEngine: ObservableObject {
     /// missing, and they hid each other: nothing deselected, so a pick made against a standing
     /// selection looked like it had been followed.
     var nativeSubtitleRenderingRequested = false
+    /// AE#955: the standing request above was raised by the engine for a wireless AirPlay receiver,
+    /// not by the host. Only such a request is withdrawn when the receiver lets go; any host call to
+    /// `setNativeSubtitleRendering` clears this and owns the request from then on.
+    var nativeRenderingImpliedByAirPlay = false
 
     /// AE#464 round 2: the position the load currently in flight was handed, parked across the window
     /// in which `load` has already zeroed the clock but the rebuilt session has not reached it yet.
@@ -4790,6 +4831,7 @@ public final class AetherEngine: ObservableObject {
                     .withSequentialOrigin(options.sequentialOrigin,
                                           declaredDuration: options.declaredDurationSeconds)
                     .withHeldSourceConnection(options.heldSourceConnection)
+                    .skippingAttachments(options.skipsContainerAttachments)
                     .withSourceOpenPolicy(options.sourceOpenPolicy)
                     .withDiagnosticContext(options.sourceDiagnosticsContext)
                     .withRequestHeaders(requestHeaders)
@@ -7519,6 +7561,7 @@ public final class AetherEngine: ObservableObject {
         let wantAirPlay = active && !wired
         guard wantAirPlay != airPlayActive else { return }
         airPlayActive = wantAirPlay
+        applyAirPlayImpliedNativeRendering(wirelessActive: wantAirPlay)
         // Reload so the load path rebuilds the playback URL on the LAN IP (active) or back on 127.0.0.1
         // (inactive). The remote-HLS bypass is exempt only while it plays the origin URL, which a receiver
         // reaches by itself; with a #316 subtitle proxy mounted it stands on the engine's own loopback
@@ -7532,6 +7575,49 @@ public final class AetherEngine: ObservableObject {
                        + (loadedOptions.nativeRemoteHLS ? " (remote-HLS bypass on its #316 subtitle origin)" : ""),
                        category: .engine)
         Task { try? await reloadAtCurrentPosition() }
+    }
+
+    /// AE#955: a wireless receiver is a display the host's overlay cannot reach, so the rendition is the
+    /// only subtitle it can show. A host that never called `setNativeSubtitleRendering(true)` left the
+    /// Sodalite#38 pin holding the rendition off on the receiver, and even deselecting a pick made there.
+    /// The engine raises the request itself when the host has not, and withdraws only its own.
+    private func applyAirPlayImpliedNativeRendering(wirelessActive: Bool) {
+        // Only a session that serves its own renditions. On the remote-HLS bypass the table is empty and
+        // AVPlayer renders the origin's renditions itself, so a request here would map to no ordinal and
+        // deselect exactly the subtitle the receiver is showing.
+        let servesOwnRenditions = !loadedOptions.nativeRemoteHLS && !nativeSubtitleTrackTable.isEmpty
+        switch Self.airPlayImpliedRenderingAction(
+            wirelessActive: wirelessActive,
+            servesOwnRenditions: servesOwnRenditions,
+            hostRequested: nativeSubtitleRenderingRequested,
+            impliedByEngine: nativeRenderingImpliedByAirPlay) {
+        case true?:
+            EngineLog.emit("[AirPlay] AE#955 wireless receiver is the display and the host has not asked for "
+                           + "the native rendition; requesting it on the host's behalf", category: .engine)
+            setNativeSubtitleRendering(true)
+            nativeRenderingImpliedByAirPlay = true
+        case false?:
+            guard servesOwnRenditions else {
+                // A later load moved onto the bypass; there is no rendition of ours left to take down.
+                nativeSubtitleRenderingRequested = false
+                nativeRenderingImpliedByAirPlay = false
+                return
+            }
+            EngineLog.emit("[AirPlay] AE#955 receiver let go; withdrawing the native rendition the engine "
+                           + "requested", category: .engine)
+            setNativeSubtitleRendering(false)
+        case nil:
+            break
+        }
+    }
+
+    /// AE#955: true raises the engine's own rendering request, false withdraws it, nil leaves the
+    /// host's word standing.
+    nonisolated static func airPlayImpliedRenderingAction(
+        wirelessActive: Bool, servesOwnRenditions: Bool = true, hostRequested: Bool, impliedByEngine: Bool
+    ) -> Bool? {
+        if wirelessActive { return hostRequested || !servesOwnRenditions ? nil : true }
+        return impliedByEngine ? false : nil
     }
 
     /// A session that cannot be reopened where it is crosses an AirPlay edge by swapping the item, not by
@@ -8047,7 +8133,7 @@ public final class AetherEngine: ObservableObject {
             + "(base \(String(format: "%.2f", base))s, backend \(playbackBackend))",
             category: .engine
         )
-        Task { @MainActor [weak self] in await self?.seek(to: target) }
+        Task { @MainActor [weak self] in await self?.seek(to: target, exact: true) }
     }
 
     /// Most recent sidecar subtitle URL; rehydrated by selectAudioTrack after pipeline reload. Cleared on clearSubtitle/stop.

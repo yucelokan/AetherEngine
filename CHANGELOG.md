@@ -18,6 +18,133 @@ the public-API contract.
   through until it is ready, and `[Upscale] stage ready in ...` logs how long that took and how many frames passed.
   A stage that cannot be built now counts as disabled, so a session only it moved to software returns to the native path.
 
+## [7.55.0] - 2026-11-02
+
+### Added
+
+- **`LoadOptions.skipsContainerAttachments` (AE#956).** Opens a Matroska source without reading its attached files,
+  the fonts of its ASS subtitles: tens of megabytes on anime releases, which the demuxer read in full before the
+  first packet (about 11 s for a remux with 23 MB of fonts over a WAN address). `fontAttachments` then stays empty
+  and a Matroska cover image is not reported; tracks and packets are unchanged. Off by default. Independently of
+  the option, every side reader and reopen of the same source (embedded subtitles, scrub stills, I-frames, the
+  Atmos and Dolby Vision passes, audio switch, live and HLS-producer reopens) now passes over the attachments,
+  which only the first open surfaces. Needs FFmpegBuild 3.12.0's `skip_attachments`. `aetherctl play` gains
+  `--skip-attachments`.
+- **`PlaybackErrorKind.sourceFabricatesRanges` (AE#958).** The origin answered a byte range with bytes from
+  somewhere else. See Fixed.
+
+### Changed
+
+- **A remote-burst press that a newer press supersedes stops settling at once.** During a burst of seek presses
+  on a slow source, each press after the first waited out the whole settle (0.7 s) before it noticed a newer
+  target had replaced it, which held that request's loader thread for the full settle. It now returns as soon
+  as the next press declares its target. Which press restarts the producer is unchanged: the first, then
+  only the last.
+- **The 4:4:4 FEL output composes each chroma site once per 16 x 16 block.** With `AETHER_FEL_CHROMA=444` the
+  A12 composed about 12.8 frames per second and video fell 30 s or more behind the clock; it now holds 24
+  frames per second. The output is byte-identical. It applies only with the `DualLayerDolbyVision` trait. A
+  device whose 4:4:4 pipeline cannot run the 16 x 16 threadgroup now logs a compose failure for 4:4:4
+  instead of failing in the encoder. Colour not yet judged on a TV.
+- **With the `DolbyVisionStillReshaping` trait, a Dolby Vision Profile 5 / 10.0 session scrubs through the
+  reshaped still path again.** `scrubPreviewDrawsInView` is now true only in a build without the trait, so a host
+  that enables it gets `scrubThumbnail` stills, the keyframe still ladder and the I-frame rendition for those
+  sources like for any other, and the held picture keeps using the same reshaping. Without the trait nothing
+  changes: previews and the held picture still go through the system compositor.
+- **Dual-layer Dolby Vision logs when a frame has no mapping-preserving RPU (AE#913).** A frame whose
+  mapping-kept RPU could not be made carries the composed one if it is bypassed. That now counts as
+  `mappingFallback=` in the `DualLayerVideoDecoder` summary, and the first one per decoder logs at info level, so a
+  device log shows whether the fallback is ever reached. Only with the `DualLayerDolbyVision` trait.
+
+### Fixed
+
+- **Software playback over a wireless AirPlay route keeps its sound after a seek.** Every prerolled clock start was
+  scheduled 250 ms out with `setRate(_:time:atHostTime:)`, a lead tuned on HDMI. An AirPlay route reports 2000 ms of
+  output latency, a start it cannot meet: from the second start of a session on, the audio renderer held its queue
+  (`hasSufficientMediaDataForReliablePlaybackStart` stayed true) and played nothing while the clock and the picture
+  ran, until a pause and play. A route whose latency exceeds the lead now starts the clock unscheduled, so the
+  synchronizer holds it until the route sounds. Measured on an Apple TV 4K (A15) with a Sonos over AirPlay and the
+  software path forced: silent after every seek before, audible at start and after every seek now, the picture held
+  1 to 4 s for the route latency and in sync from there. HDMI keeps the scheduled start.
+- **A rate a host repeats right after `play()` no longer starts the software clock a second time.** It reached the
+  output while the first start was still in flight, and since the synchronizer's rate reads back asynchronously it
+  either took the preroll branch again or re-anchored the running clock at a time read back mid-change. The output
+  now records the rate it last commanded, and a repeated one is a no-op. The one stale pause seen (a reporter's
+  AirPlay speaker stopped the clock at 75.616 while it stood at 118.52) followed such a double start; 35 double
+  starts on a Sonos over AirPlay did not reproduce it, so this is hardening, not a proven cause.
+- **Bitmap subtitles show on an AirPlay receiver (#955).** A wireless receiver is a display the host overlay cannot
+  reach, so the engine now requests the native rendition there when the host left it unasked, and withdraws only
+  its own request when the receiver lets go (a host that calls `setNativeSubtitleRendering(_:)` sees no change; the
+  remote-HLS bypass is left out, its renditions are the origin's). Two defects kept the OCR rendition from selecting:
+  the forward prefetcher never noted end of file, so inside the last `subtitleOCRLeadSeconds` of a film the window
+  never read as covered, and every subtitle pick, a re-pick of the same track included, restarted recognition.
+  Measured on a three-PGS MKV: no selection after 60 s before, selected in 2.8 s now.
+- **A native session that joined inside an audio-only tail ends where it ends (AE#962).** The last video packet of a
+  title was flushed into the last segment of the audio tail, a minute of item time late, so a join inside the tail
+  placed the item a minute late and ended it at once; it now goes out with its own segment. At the real end AVPlayer
+  publishes its clock back at the end of the video track, which the #287 recovery read as a premature end and replayed
+  the whole tail: the host now judges an end by the highest clock published since the last seek. The in-place
+  re-seek of that recovery waits at most 20 s, then accepts the end on the playhead it measured, instead of leaving
+  a black picture with the UI on Playing.
+- **Native end recovery preserves the clock observed before a slow AVFoundation read (AE#962).** A fresh
+  end-of-playback peak no longer expires while the reading is suspended, avoiding replay of an
+  already-completed audio tail. A reading superseded by a new session or seek is ignored.
+
+- **Software Live audio keeps advancing when video backpressures (AE#934).** Sessions without a
+  DVR feeder read ahead on the existing source connection and park compressed video within a
+  memory-only byte budget independent of disk-cache settings. Large packets remain playable;
+  ready video can drain while source I/O waits, and an empty video queue waits for source data
+  without polling. The Live clock, keyframe admission and DVR routing remain unchanged.
+
+- **Software playback keeps audio moving when entering background with a full video queue.**
+  Both Live and VOD retire parked video before applying the background read gate, so an
+  off-screen renderer cannot prevent the demux loop from reaching subsequent audio.
+
+- **An origin that answers byte ranges with other bytes is caught instead of played (AE#958).** IPTV timeshift
+  archives answer every `Range: bytes=X-` with a `206` whose `Content-Range` names X while the body starts on the
+  origin's own chunk boundary. Undeclared, that played as audio that looped and drifted out of sync on the native
+  path, a PTS step of tens of seconds on the software path, or a source given up after a native scrub. A ranged
+  reconnect that starts inside bytes the reader already holds (the frontier refill, the return to the retained head)
+  now asks 4 KB early and holds delivery back until those 4 KB match; a mismatch latches the reader into failing
+  reads, the native producer skips its byte-offset revives, and every route reports
+  `sourceFabricatesRanges`, which asks the host to load the source with `sequentialOrigin`. An honest origin pays
+  4 KB per reconnect. `FabricatedRangeOriginTests` covers both origins, the probe and the classification.
+
+- **A source connection that trickles far below playback rate while a read waits is ended and replaced.** The
+  delivery-gap watchdog judged only the time since the last delivery, so a drip defeated it: on an Apple TV playing a
+  4K HDR10 MKV from a debrid origin over a held connection, a fresh generation delivered 256 KB every 40 to 100 s for
+  three minutes, every drip reset the clock (and woke the read loop's forward wait), no watchdog line fired, and
+  AVPlayer stalled for 25 s once the forward buffer drained. The watchdog now also judges volume: a consumer starved on
+  forward data for one stall period (across as many 256 KB AVIO reads as that takes), with a read blocked now and less
+  than 2 MiB delivered in the last 20 s, ends the generation exactly as a silent one is ended. A paused player, a full
+  window, a healthy stream and a live source (which arrives at its own bitrate, so a radio channel sits below the floor
+  by design) are never judged. `TrickleWatchdogTests` covers the drip, AVIO-sized reads, healthy, parked and
+  low-bitrate live streams, and parity with the gap path.
+
+- **A subtitle side reader on a Matroska source no longer stops at second 0 after a deadline-cut positioning
+  (#944).** When the timestamp seek ran out of budget, libavformat's generic fallback read into the cut and the
+  matroska demuxer latched end of stream in its private `done` flag, which only its own `read_seek` cleared. The
+  byte-estimate reposition that follows never reaches `read_seek`, so the first read after it returned EOF: the
+  forward prefetch exited as `endOfFile` with nothing harvested and was not restarted, leaving cues ahead of the
+  playhead to the pump for the rest of the session. FFmpegBuild 3.12.1 makes the demuxer honour
+  `io_repositioned` after any byte or generic seek (submitted upstream as FFmpeg PR 25665).
+  `Issue944LatchedReadErrorTests` gains the Matroska case, which reads 0 of 20 packets on 3.12.0.
+
+- **`selectChapter(id:)` lands on the chapter mark.** It sought with `seek(to:)`, which on the software host's AV1
+  route may land on a keyframe up to several seconds away since 7.54.0; it now uses `seek(to:exact:)`. Every other
+  route was exact already.
+
+- **An https source that redirects to plain http on a public host is followed over https.** App Transport
+  Security refuses the http hop before a byte moves (`-1022`), every reopen meets the same refusal, and once the
+  opening budget runs out the load fails as `sourceOpenFailed` / `-1004` with "Source did not respond within the
+  opening budget", which reads as a slow server. A media server behind a TLS-terminating proxy builds exactly this
+  link when it derives its public address from the inner http request: a Jellyfin-compatible add-on bridge
+  answered `https://host/Videos/{id}/stream.mkv` with a 302 to `http://host/...` on the same host, and the same
+  stream played in players with their own HTTP stack. `RedirectHeaderPolicy.redirectRequest` now asks for the
+  target over https (port 80 dropped) when the original request was https and the target is a public name. Local
+  names and IP literals keep the redirect as sent, and so does any host the app's ATS configuration already
+  allows over http (`NSExceptionDomains`, or `NSAllowsArbitraryLoads` where the system honors it). The upgraded
+  target is the same origin, so a same-host hop keeps its credentials.
+
 ## [7.54.0] - 2026-11-01
 
 ### Added

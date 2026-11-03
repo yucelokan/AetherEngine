@@ -117,7 +117,7 @@ swift run aetherctl play --fel --surface --dv-pin 'darkest:240,period:2' <url>  
 swift run aetherctl play --upscale <sd-or-720p-url>           # opt in to upscaling sub-1080p SDR video to the display (LoadOptions.upscalesLowResolutionVideo, #846); logs one [Upscale] line and an UPSCALE line once the first frame is upscaled
 ```
 
-`--host-calls nativesubs,nativerender@N,subsoff@N,subson@N` drives the NATIVE SUBTITLE RENDITION path
+`--host-calls nativesubs,nativerender@N,subsoff@N,subson@N,lanreload@N` drives the NATIVE SUBTITLE RENDITION path
 for VOD, which nothing here could do before (Sodalite#156). `serve --native-subs` stands the renditions
 up and `live --force-master` routes a channel behind them, but no VOD session loaded with
 `prepareNativeSubtitles`, so the half that matters was untestable: whether AVPlayer actually HOLDS a
@@ -140,6 +140,22 @@ A healthy run reads `selected=German engineActive=2`, then `selected=none engine
 off, then `selected=German engineActive=2` after the on. `selected=German engineActive=nil` is a
 rendition nobody is filling any more, which on an AirPlay receiver is an empty caption box; and
 `selected=none engineActive=2` is subtitles that never came back.
+
+`lanreload@N` fires `reloadAtCurrentPosition()` at tick N, the session-preserving rebuild a wireless
+AirPlay receiver starts (AE#955), and prints `activeSubtitleTrackIndex` on both sides of it plus a
+`LEGIBLE` and `VTT` readout four ticks later. A Mac has no receiver to flip the route, so this is the
+reload without the route. With a bitmap track it also drives the OCR-fed rendition through the rebuild:
+
+```bash
+aetherctl play --subs eng --seconds 30 \
+  --host-calls nativesubs,lanreload@8,nativerender@14,subson@15 file://$PWD/pgs.mkv
+```
+
+A healthy run arms `[SubtitleOCR] worker armed` once, logs `OCR pre-fill done ... exit=covered` and
+reads `selected=English engineActive=4` after the on. The first Vision call in a process can take about
+a minute while the system compiles its model, so judge a slow pre-fill from a second run. The `VTT`
+readout fetches the first rendition when none is selected, so its empty segments before the select are
+the harness asking, not a receiver.
 
 `--sidecar <lang>=<path-or-url>[,<lang>=<path>...]` fills `LoadOptions.externalSubtitles`, the load-time
 declaration a host makes. On a remote `m3u8` this is what makes the engine stand up its rewritten master
@@ -281,6 +297,8 @@ live-only session took a rebuild that rejoins at the edge.
 `--present-times` counts what actually reached the screen on the NATIVE path, which had no frame observable at all: `--frame-times` reads the software renderer's own reports, so a judder report on the AVPlayer route could only be argued about from `AVPlayerItemTrack.currentVideoFrameRate`, which AVFoundation documents as an estimate and not a frame count (and which reads 0 in a CLI run, where nothing binds a render surface). It attaches an `AVPlayerItemVideoOutput` to the engine's own item and counts DISTINCT presentation times, appending `pres` (frames presented since the last tick) per tick and closing with `presented frames: total=N perSecond min/median/max=.. largestGap=Ss at Ts`. `largestGap` is the field that earns the flag: it separates "the picture is late" from "only the random access points survive", because a 29.97 fps session presenting nothing but its container keys shows a gap of one GOP rather than one frame. Seeks are bracketed out of the gap accounting, which has to happen around the call and not after it (the landing frame arrives before `seek(to:)` returns, so the first version of this reported the seek jump as the session's largest gap on every run). Attaching an output gives AVPlayer a pixel-buffer consumer it would not otherwise have, so a run with the flag is not byte-for-byte the run without it; it is the same decode path either way, and `--picture-probe` attaches a second one if both are on.
 
 `--sequential-origin` declares `LoadOptions.sequentialOrigin`, the IPTV timeshift / catch-up shape whose `206` answers are fabricated (#346): one long-lived unranged GET, no ranged probes, no tail read, so **seeking is unavailable** in the run. On VOD it needs `--declared-duration S`, which fills `LoadOptions.declaredDurationSeconds`, because the estimate that the tail read would have produced is gone with the tail read.
+
+`--skip-attachments` sets `LoadOptions.skipsContainerAttachments` (AE#956): a Matroska source opens without reading its attached files, the fonts of its ASS subtitles. The observable is the open itself: against a throttled origin and an MKV that carries fonts, the time to the first `[AetherEngine]` load line drops by the fonts' transfer time, and the `[AVIOReader]` byte counts by their size.
 
 `--held-connection` declares `LoadOptions.heldSourceConnection` (#377): the reader asks the origin
 once and pulls the whole file over that connection, instead of ending at the window high water and

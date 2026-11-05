@@ -1,14 +1,14 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-05. Integration base: upstream 7.56.0
-(`76ad51a7a0a13d4844c48a90db98d6ca6abcb458`).
+Updated: 2026-11-05. Integration base: upstream 7.57.0
+(`7d50497f905531f6ebefe937f821fab0ba4ac0df`).
 
 ## Current differences
 
 One, generic and meant for an upstream pull request: the upscale stage builds off the main actor
 (`DeferredFrameUpscaler`), with frames passing through until it is ready, and a stage that cannot be
 built counts as disabled, so it gets the 7.54.0 way back to the native path. Everything else matches
-7.56.0 (still not upstream there); this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and
+7.57.0 (still not upstream there); this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and
 go upstream as pull requests.
 
 Released upstream since the previous integration: the session callback release (PR #922, merge

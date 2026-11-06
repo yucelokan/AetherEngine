@@ -10,13 +10,28 @@ the public-API contract.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [7.58.0] - 2026-11-05
+
+### Added
+
+- **Hosts can read whether the source is progressive or interlaced (AE#983).** `sourceVideoScan`
+  publishes a `VideoScan` (`.progressive`, `.interlaced(VideoFieldOrder)`, `.unknown`) at load from
+  the evidence the routing reads: the field order, the H.264 SPS fallback (#150) and the
+  decoded-frame sample (#232), so a panel no longer guesses "1080p" from the height of a 1080i
+  source. On the software path `decodedVideoFormat.deinterlace` names the deinterlacer in the frame
+  path (filter, hardware or not, field or frame rate), enough for "1080i, deinterlaced to 50 fps".
+
 ### Fixed
 
-- **The upscale stage no longer builds on the main actor (#846).** The software host built it while loading: the
-  colour kernels compile, MetalFX creates its scaler and VideoToolbox starts its session, 460 ms on an M5 Max with
-  cold caches and a likely 3 s stall on an iPhone's first load. It now builds on a background queue, frames pass
-  through until it is ready, and `[Upscale] stage ready in ...` logs how long that took and how many frames passed.
-  A stage that cannot be built now counts as disabled, so a session only it moved to software returns to the native path.
+- **The app froze for about 4 s when an upscaled video started (`upscalesLowResolutionVideo`, AE#846).** The
+  software host built the upscale stage on the main thread during `load()`, and starting VideoToolbox super
+  resolution loads its model on the Neural Engine through a synchronous XPC, about 4 s cold on Apple TV, long
+  enough for the watchdog to kill the app now and then. The stage is now built on its own queue and frames go
+  out as decoded until it is ready (`[Upscale] stage built in ... ms`). A stage that cannot be built now
+  switches itself off like a failing one, so `$activeUpscale` reports it, the plan is remembered for the
+  process and a URL VOD session that only the stage put on the software path returns to the native path.
 
 ## [7.57.0] - 2026-11-05
 

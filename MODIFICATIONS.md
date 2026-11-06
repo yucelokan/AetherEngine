@@ -1,15 +1,17 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-05. Integration base: upstream 7.57.0
-(`7d50497f905531f6ebefe937f821fab0ba4ac0df`).
+Updated: 2026-11-06. Integration base: upstream 7.58.0
+(`7ea27bff8d8fb4a457d6e0042b0537eb31253583`).
 
 ## Current differences
 
-One, generic and meant for an upstream pull request: the upscale stage builds off the main actor
-(`DeferredFrameUpscaler`), with frames passing through until it is ready, and a stage that cannot be
-built counts as disabled, so it gets the 7.54.0 way back to the native path. Everything else matches
-7.57.0 (still not upstream there); this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and
-go upstream as pull requests.
+None in the engine: the source matches 7.58.0 exactly; this file and `COPYING.GPL3` are the only
+additions. Fixes made here are generic and go upstream as pull requests.
+
+The fork's earlier upscale change (`DeferredFrameUpscaler`, 721b9ebc: the stage built off the main
+actor, frames passing through until it is ready) was never offered upstream. Upstream fixed the
+same freeze itself in 7.58.0 (AE#846: the stage builds on its own queue, a stage that cannot be
+built switches itself off), and this integration takes upstream's version and drops the fork's.
 
 Released upstream since the previous integration: the session callback release (PR #922, merge
 `74f3a674d3cc18362a4d8c2f63e03f28259b9539`, in 7.52.0) and HLS byte-range segments (PR #928,

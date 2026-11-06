@@ -216,7 +216,7 @@ final class SoftwarePlaybackHost {
     /// #846: set by the load before `load(demuxer:...)`; non-nil runs the upscale stage on every decoded frame.
     var upscalePlan: UpscalePlan?
 
-    /// The stage of the current plan (a `DeferredFrameUpscaler`), nil without a plan.
+    /// The stage built for the current plan (a `FrameUpscaler`), nil when none was.
     /// Typed loosely because the class does not exist in simulator builds or before OS 26.
     private(set) var frameUpscaler: AnyObject?
 
@@ -1198,8 +1198,7 @@ final class SoftwarePlaybackHost {
         }
     }
 
-    /// #846: `handler` wrapped in the upscale stage when a plan is set, else unchanged. The stage builds off
-    /// the main actor and frames pass through until it is ready, or for good when it cannot be built.
+    /// #846: `handler` wrapped in the upscale stage when a plan is set and a stage builds, else unchanged.
     /// Never for the dual-layer decoder (FEL sources are HDR and refused upstream).
     func upscaledFrameHandler(
         _ handler: @escaping DecodedFrameHandler,
@@ -1211,7 +1210,8 @@ final class SoftwarePlaybackHost {
         #if !targetEnvironment(simulator)
         if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
             let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
-            let stage = DeferredFrameUpscaler(plan: plan, frameInterval: interval)
+            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval, buildQueue: FrameUpscaler.stageBuildQueue)
+            else { return handler }
             frameUpscaler = stage
             return UpscalingFrameHandler.wrap(handler) { stage.upscale($0, pts: $1) }
         }

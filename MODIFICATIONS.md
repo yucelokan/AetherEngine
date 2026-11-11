@@ -5,19 +5,26 @@ Updated: 2026-11-11. Integration base: upstream 7.58.0
 
 ## Current differences
 
-One fork-only engine change, offered upstream; otherwise the source matches 7.58.0 exactly, and this
-file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as
-pull requests.
+One engine change taken from upstream ahead of its release, with one follow-up still open upstream;
+otherwise the source matches 7.58.0 exactly, and this file and `COPYING.GPL3` are the only other
+additions. Fixes made here are generic and go upstream as pull requests.
 
 - The MPEG-TS header wait for a PAT program that never sends its PMT (2026-11-11): `Demuxer`
-  releases `AVFMTCTX_NOHEADER` from its interrupt callback after 2.5 s of stream analysis when one
-  program still has no PMT and another has its PMT and streams, and the `open timings` line reports
-  how the analysis ended (`stop`, `unresolved`, `programs`, `pmtMissing`, `headerWait`,
-  `probeBytes`, `closeToReturn`). Files: `Sources/AetherEngine/Demuxer/Demuxer.swift`,
+  releases `AVFMTCTX_NOHEADER` from its interrupt callback after 2.5 s of stream analysis that
+  received data (a stall counts as at most 0.5 s) when one program still has no PMT and another has
+  its PMT and an audio or video stream, and the `open timings` line reports how the analysis ended
+  (`stop`, `unresolved`, `programs`, `pmtMissing`, `headerWait`, `probeBytes`, `closeToReturn`).
+  Upstream: [#1020](https://github.com/superuser404notfound/AetherEngine/pull/1020) (merged as
+  `b8b50f6cdc3aac6824e23909b12ea81a3c8b994e`), the maintainer's follow-up
+  `b7e59a37f396025296ed852393967f23d36051c3` (the window runs on time the input delivered data,
+  `stop=complete` became `stop=resolved`, cherry-picked here), and
+  [#1038](https://github.com/superuser404notfound/AetherEngine/pull/1038) (open: only audio and
+  video make a program ready). None of the three is in a release yet; 7.62.1 does not carry them.
+  The header-wait code and its tests are identical to upstream's; the docs differ only where the
+  7.58.0 docs layout does. Files: `Sources/AetherEngine/Demuxer/Demuxer.swift`,
   `Tests/AetherEngineTests/MissingPMTProbeReleaseTests.swift`, `DocumentedConstantsTests.swift`,
-  `docs/api.md`, `docs/formats.md`, `CHANGELOG.md`. Upstream pull request:
-  [#1020](https://github.com/superuser404notfound/AetherEngine/pull/1020) (open). Drop this entry
-  and take upstream's version when it is released.
+  `docs/api.md`, `docs/formats.md`, `CHANGELOG.md`. Drop this entry and take upstream's version at
+  the integration of the first release that carries all three.
 
 The fork's earlier upscale change (`DeferredFrameUpscaler`, 721b9ebc: the stage built off the main
 actor, frames passing through until it is ready) was never offered upstream. Upstream fixed the

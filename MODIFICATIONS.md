@@ -1,12 +1,23 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-06. Integration base: upstream 7.58.0
+Updated: 2026-11-11. Integration base: upstream 7.58.0
 (`7ea27bff8d8fb4a457d6e0042b0537eb31253583`).
 
 ## Current differences
 
-None in the engine: the source matches 7.58.0 exactly; this file and `COPYING.GPL3` are the only
-additions. Fixes made here are generic and go upstream as pull requests.
+One fork-only engine change, offered upstream; otherwise the source matches 7.58.0 exactly, and this
+file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as
+pull requests.
+
+- The MPEG-TS header wait for a PAT program that never sends its PMT (2026-11-11): `Demuxer`
+  releases `AVFMTCTX_NOHEADER` from its interrupt callback after 2.5 s of stream analysis when one
+  program still has no PMT and another has its PMT and streams, and the `open timings` line reports
+  how the analysis ended (`stop`, `unresolved`, `programs`, `pmtMissing`, `headerWait`,
+  `probeBytes`, `closeToReturn`). Files: `Sources/AetherEngine/Demuxer/Demuxer.swift`,
+  `Tests/AetherEngineTests/MissingPMTProbeReleaseTests.swift`, `DocumentedConstantsTests.swift`,
+  `docs/api.md`, `docs/formats.md`, `CHANGELOG.md`. Upstream pull request:
+  [#1020](https://github.com/superuser404notfound/AetherEngine/pull/1020) (open). Drop this entry
+  and take upstream's version when it is released.
 
 The fork's earlier upscale change (`DeferredFrameUpscaler`, 721b9ebc: the stage built off the main
 actor, frames passing through until it is ready) was never offered upstream. Upstream fixed the

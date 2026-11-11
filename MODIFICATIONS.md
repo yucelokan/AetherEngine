@@ -5,11 +5,20 @@ Updated: 2026-11-12. Integration base: upstream 7.58.0
 
 ## Current differences
 
-Two changes: one engine change, offered upstream and not merged there yet, and one test change,
-not offered upstream yet. Otherwise the source matches 7.58.0 exactly, and this file and
+Three changes: two engine changes, offered upstream and not merged there yet, and one test
+change, not offered upstream yet. Otherwise the source matches 7.58.0 exactly, and this file and
 `COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as pull
 requests.
 
+- The MPEG-TS header wait for a PAT program that never sends its PMT (2026-11-11): `Demuxer`
+  releases `AVFMTCTX_NOHEADER` from its interrupt callback after 2.5 s of stream analysis when one
+  program still has no PMT and another has its PMT and streams, and the `open timings` line reports
+  how the analysis ended (`stop`, `unresolved`, `programs`, `pmtMissing`, `headerWait`,
+  `probeBytes`, `closeToReturn`). Files: `Sources/AetherEngine/Demuxer/Demuxer.swift`,
+  `Tests/AetherEngineTests/MissingPMTProbeReleaseTests.swift`, `DocumentedConstantsTests.swift`,
+  `docs/api.md`, `docs/formats.md`, `CHANGELOG.md`. Upstream pull request:
+  [#1020](https://github.com/superuser404notfound/AetherEngine/pull/1020) (open). Drop this entry
+  and take upstream's version when it is released.
 - The software decoder's playback thread cap (2026-11-12): `SoftwareVideoDecoder` decodes on at most
   16 threads (`playbackThreadCount`), where libavcodec's automatic choice stops, so a Mac with more
   than 16 cores no longer holds more frames back in frame threading than libavcodec recommends (an

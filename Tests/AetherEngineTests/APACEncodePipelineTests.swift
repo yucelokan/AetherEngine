@@ -3,9 +3,14 @@ import Foundation
 @testable import AetherEngine
 
 /// The spatial bridge encodes on `APACEncodePipeline`'s queue while it decodes the next chunk
-/// (#731). What reaches the muxer must be what a synchronous encode on the producer thread
-/// produced: the same packets, in the same order, on the same timestamps, through restarts,
-/// resets and failures.
+/// (#731). Every chunk the producer rendered must reach the encoder intact and in order, and what
+/// reaches the muxer must be the packets the encoder returned, in the same order, on the same
+/// timestamps, through restarts, resets and failures.
+///
+/// The reference is the real encoder seen from inside the pipeline (`RecordingAPACEncoder`), not a
+/// second encode on the test thread: Apple's APAC encoder is not byte-reproducible across threads
+/// (macOS 27.0.1 returns one of two streams for the same input, 851,362 or 851,540 bytes for the 40
+/// chunks below, depending on the thread and the process's history).
 @Suite("APAC encode pipeline", .offCooperativePoolOneLane)
 struct APACEncodePipelineTests {
 
@@ -37,31 +42,48 @@ struct APACEncodePipelineTests {
         }
     }
 
-    @Test("the packets are a synchronous encode's, in order, stamped from the first chunk's position")
-    func matchesSynchronousEncode() throws {
+    @Test("the encoder gets every chunk as rendered, and the packets are its own, in order, stamped from the first chunk's position")
+    func passesChunksAndPacketsThroughExactly() throws {
         guard #available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *) else { return }
-        let reference = try makeEncoder()
-        let planes = (0..<Self.layout.channelCount).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: Self.chunk) }
-        defer { planes.forEach { $0.deallocate() } }
-        var expected: [APACEncoder.Packet] = []
-        for k in 0..<40 {
-            fill(planes, frames: Self.chunk, startFrame: k * Self.chunk)
-            expected += try reference.encode(planes: planes.map { UnsafePointer($0) }, frameCount: Self.chunk)
+        // What the producer renders, kept apart from the pool, whose buffers are reused.
+        let scratch = (0..<Self.layout.channelCount).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: Self.chunk) }
+        defer { scratch.forEach { $0.deallocate() } }
+        let rendered: [[[UInt32]]] = (0..<40).map { k in
+            fill(scratch, frames: Self.chunk, startFrame: k * Self.chunk)
+            return scratch.map { UnsafeBufferPointer(start: $0, count: Self.chunk).map(\.bitPattern) }
         }
-        expected += try reference.flush()
 
-        let pipeline = APACEncodePipeline(encoder: try makeEncoder(), channels: Self.layout.channelCount,
+        let real = try makeEncoder()
+        let encoder = RecordingAPACEncoder(real)
+        let pipeline = APACEncodePipeline(encoder: encoder, channels: Self.layout.channelCount,
                                           bufferFrames: Self.chunk)
+        #expect(pipeline.leadingFrames == real.leadingFrames)
+        #expect(pipeline.magicCookie == real.magicCookie)
         var buffer = pipeline.takeInitialBuffer()
         var got: [APACEncodePipeline.StampedPacket] = []
+        var errors: [Error] = []
         for k in 0..<40 {
             submit(pipeline, &buffer, chunks: k..<(k + 1), origin: 96_000)
-            got += pipeline.collect().packets
+            let out = pipeline.collect()
+            got += out.packets
+            errors += out.errors
         }
         let finished = pipeline.finish()
         got += finished.packets
-        #expect(finished.errors.isEmpty)
-        #expect(got.map(\.data) == expected.map(\.data))
+        errors += finished.errors
+        #expect(errors.isEmpty)
+
+        #expect(encoder.calls == Array(repeating: .encode, count: 40) + [.flush])
+        let inputs = encoder.inputs
+        try #require(inputs.count == rendered.count)
+        let altered = inputs.indices.filter { inputs[$0] != rendered[$0] }
+        #expect(altered.isEmpty, "chunks that reached the encoder differing from what was rendered: \(altered)")
+
+        let returned = encoder.packets
+        try #require(!returned.isEmpty)
+        #expect(got.count == returned.count)
+        #expect(got.map(\.data) == returned.map(\.data))
+        #expect(got.map(\.isSync) == returned.map(\.isSync))
         #expect(got.map(\.pts) == got.indices.map { 96_000 + Int64($0) * 1024 })
     }
 
@@ -169,5 +191,53 @@ struct APACEncodePipelineTests {
         var referenceBuffer = reference.takeInitialBuffer()
         submit(reference, &referenceBuffer, chunks: 0..<8, origin: 0)
         #expect(closed == reference.settle().packets.count, "every queued chunk ran before close returned")
+    }
+}
+
+/// The real encoder, recording every call: the samples each `encode` was given (copied on entry,
+/// before the encoder reads them, because the pipeline's buffers are reused) and every packet the
+/// encoder returned, `flush` included.
+@available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+private final class RecordingAPACEncoder: APACPacketEncoding, @unchecked Sendable {
+    enum Call: Equatable { case encode, flush, reset }
+
+    private let encoder: APACEncoder
+    private let lock = NSLock()
+    private var recordedCalls: [Call] = []
+    private var recordedInputs: [[[UInt32]]] = []
+    private var recordedPackets: [APACEncoder.Packet] = []
+
+    init(_ encoder: APACEncoder) { self.encoder = encoder }
+
+    var leadingFrames: Int { encoder.leadingFrames }
+    var magicCookie: Data { encoder.magicCookie }
+
+    var calls: [Call] { lock.withLock { recordedCalls } }
+    /// Per `encode` call, per channel, the samples' bit patterns.
+    var inputs: [[[UInt32]]] { lock.withLock { recordedInputs } }
+    var packets: [APACEncoder.Packet] { lock.withLock { recordedPackets } }
+
+    func encode(planes: [UnsafePointer<Float>], frameCount: Int) throws -> [APACEncoder.Packet] {
+        let input = planes.map { UnsafeBufferPointer(start: $0, count: frameCount).map(\.bitPattern) }
+        lock.withLock {
+            recordedCalls.append(.encode)
+            recordedInputs.append(input)
+        }
+        return record(try encoder.encode(planes: planes, frameCount: frameCount))
+    }
+
+    func flush() throws -> [APACEncoder.Packet] {
+        lock.withLock { recordedCalls.append(.flush) }
+        return record(try encoder.flush())
+    }
+
+    func reset() {
+        lock.withLock { recordedCalls.append(.reset) }
+        encoder.reset()
+    }
+
+    private func record(_ packets: [APACEncoder.Packet]) -> [APACEncoder.Packet] {
+        lock.withLock { recordedPackets += packets }
+        return packets
     }
 }

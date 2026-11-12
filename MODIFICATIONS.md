@@ -5,9 +5,10 @@ Updated: 2026-11-12. Integration base: upstream 7.58.0
 
 ## Current differences
 
-One engine change, offered upstream and not merged there yet; otherwise the source matches 7.58.0
-exactly, and this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic
-and go upstream as pull requests.
+Two changes: one engine change, offered upstream and not merged there yet, and one test change,
+not offered upstream yet. Otherwise the source matches 7.58.0 exactly, and this file and
+`COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as pull
+requests.
 
 - The software decoder's playback thread cap (2026-11-12): `SoftwareVideoDecoder` decodes on at most
   16 threads (`playbackThreadCount`), where libavcodec's automatic choice stops, so a Mac with more
@@ -17,6 +18,14 @@ and go upstream as pull requests.
   tests are identical to upstream's. Files: `Sources/AetherEngine/Decoder/SoftwareVideoDecoder.swift`,
   `Tests/AetherEngineTests/FrameDecodeThreadBudgetTests.swift`, `CHANGELOG.md`. Drop this entry
   and take upstream's version at the integration of the first release that carries it.
+- The APAC encode pipeline test's reference (2026-11-12): `APACEncodePipelineTests` no longer
+  compares the pipeline with a second APAC encode on the test thread, because Apple's APAC encoder
+  is not byte-reproducible across threads (macOS 27.0.1 gives one of two streams, 851,362 or
+  851,540 bytes, for the same 40 chunks of 7.1.4). It wraps the real encoder through an internal
+  `APACPacketEncoding` protocol and checks byte for byte the chunks the encoder receives and the
+  packets it returns. No change in playback. Upstream: not offered yet; it goes upstream once a
+  suite run has passed it. Files: `Sources/AetherEngine/Audio/Spatial/APACEncodePipeline.swift`,
+  `Tests/AetherEngineTests/APACEncodePipelineTests.swift`, `CHANGELOG.md`.
 
 The fork's earlier upscale change (`DeferredFrameUpscaler`, 721b9ebc: the stage built off the main
 actor, frames passing through until it is ready) was never offered upstream. Upstream fixed the

@@ -20,6 +20,16 @@ the public-API contract.
   automatic choice stops and above which it warns, so such a Mac holds at most 15, as a 16-core one
   already did. Apple TV, iPhone and iPad have fewer cores and are unchanged.
 
+### Tests and CI
+
+- **The APAC encode pipeline test no longer expects Apple's encoder to give the same bytes on two threads.**
+  It compared the pipeline with a second encode on the test thread, but Apple's APAC encoder is not
+  byte-reproducible across threads: on macOS 27.0.1 the same 40 chunks of 7.1.4 come out as one of two
+  streams (851,362 or 851,540 bytes) depending on the thread and the process's history, so the test
+  failed with an exact pipeline. It now wraps the real encoder through an internal `APACPacketEncoding`
+  protocol and checks byte for byte that every rendered chunk reached the encoder in order and that the
+  pipeline's packets are the encoder's own, in order, on their timestamps. No change in playback.
+
 ## [7.58.0] - 2026-11-05
 
 ### Added

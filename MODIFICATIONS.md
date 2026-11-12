@@ -15,7 +15,7 @@ and go upstream as pull requests.
   18-core Mac held 17). Upstream:
   [#1042](https://github.com/superuser404notfound/AetherEngine/pull/1042) (open). The code and
   tests are identical to upstream's. Files: `Sources/AetherEngine/Decoder/SoftwareVideoDecoder.swift`,
-  `Tests/AetherEngineTests/Issue220SoftwareDecoderDrainTests.swift`, `CHANGELOG.md`. Drop this entry
+  `Tests/AetherEngineTests/FrameDecodeThreadBudgetTests.swift`, `CHANGELOG.md`. Drop this entry
   and take upstream's version at the integration of the first release that carries it.
 
 The fork's earlier upscale change (`DeferredFrameUpscaler`, 721b9ebc: the stage built off the main

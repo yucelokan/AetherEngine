@@ -5,10 +5,22 @@ Updated: 2026-11-12. Integration base: upstream 7.64.0
 
 ## Current differences
 
-Two changes: one engine change offered upstream and not merged there yet, and one test change, not
-offered upstream yet. Otherwise the source matches 7.64.0 exactly, and this file and `COPYING.GPL3`
-are the only other additions. Fixes made here are generic and go upstream as pull requests.
+Three changes: two engine changes offered upstream and not merged there yet, and one test change,
+not offered upstream yet. Otherwise the source matches 7.64.0 exactly, and this file and
+`COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as pull
+requests.
 
+- The HLS MIME type on the #154 reroute (2026-11-12): where the engine read `#EXTM3U` in the body
+  and moved a VOD load onto the AVPlayer bypass (#154, AE#246), the asset declares
+  `application/vnd.apple.mpegurl` (`AVURLAssetOverrideMIMETypeKey`), so a playlist behind a URL
+  without `.m3u8` served as `video/mp4` or `application/octet-stream` plays instead of failing with
+  AVFoundation -11829 / -11828. Carried by an engine-internal `LoadOptions.hlsPlaylistProvenByBody`
+  and `SessionLoadContract.declaresHLSPlaylistMIMEType`, so rebuilds and swaps keep it.
+  Upstream: [#1040](https://github.com/superuser404notfound/AetherEngine/pull/1040) (open; same code,
+  tests and docs). Files: `Sources/AetherEngine/Native/NativeAVPlayerHost.swift`, `AetherEngine.swift`,
+  `AetherEngine+Loading.swift`, `AetherEngine+ReloadWithOptions.swift`, `PlayerState.swift`,
+  `Tests/AetherEngineTests/MisTypedPlaylistRerouteTests.swift`, `docs/guide.md`, `CHANGELOG.md`. Drop
+  this entry and take upstream's version at the integration of the first release that carries it.
 - The software decoder's playback thread cap (2026-11-12): `SoftwareVideoDecoder` decodes on at most
   16 threads (`playbackThreadCount`), where libavcodec's automatic choice stops, so a Mac with more
   than 16 cores no longer holds more frames back in frame threading than libavcodec recommends (an

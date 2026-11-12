@@ -128,7 +128,20 @@ The video track's output time base is normally the source's, which movenc scales
 
 It then uses a time base with one frame in whole ticks (1/24000 with 1001 ticks for 23.976, 1/24000 with 1000 ticks for 24), anchored at the stream's start time. `HLSSegmentProducer` moves each packet whose source-axis PTS lies within one source tick of a grid slot onto that slot (the DTS onto its own slot, never past the PTS), and rescales everything else as before.
 
-The grid is derived from stream fields only, never from observed packets. So every producer of a session writes the same `init.mp4` timescale, and a restarted segment still matches its continuous twin.
+The grid is derived once per session, before the first producer runs, from the stream's declared rate. So every producer of a session writes the same `init.mp4` timescale, and a restarted segment still matches its continuous twin. The one exception to "declared" is a declared rate that is not a standard rate at all: `SourceFrameRateMeasurement` then fits the rate to the head packets that `find_stream_info` already queued (peeked, not consumed) and the load uses that instead (Sodalite#236). mkvmerge writes the first frame's duration as a track's DefaultDuration, so film carrying 2:3 pulldown timing declares 20 fps while it runs at 23.976.
+
+#### 2:3 pulldown timing on 24p film
+
+Some encodes of soft-telecined DVDs keep the film's progressive frames but stamp each with the time its first field would appear on a 59.94 Hz field clock: frames last three fields, then two (50 ms, 33 ms), averaging 23.976. On a 23.976 Hz panel a 33 ms frame can fall between two refreshes and never be shown, and whether it does depends on the vsync phase, which every start and seek re-rolls. The result is a pan that stutters on one pass and plays clean on the next (Sodalite#236).
+
+These frames lie 8 to 17 ms from a grid slot, far past `CFRFrameGrid`'s one-tick tolerance. On a 24p grid, `PulldownCadenceRetimer` owns every video packet instead:
+
+- It keeps a window of the last 48 packets (decode order) and calls the stretch film when every spacing among them, in presentation order, is two or three fields and they average two and a half. Anything else (true 30p or 60p video, a constant-rate stretch) goes through `CFRFrameGrid.place` unchanged.
+- In film, each frame goes to its nearest slot on a 24p grid whose origin follows the film. An edit that drops or repeats a field moves the film one field against the grid; the retimer re-centres on the running mean deviation, so no frame moves more than about one field from its source time.
+- A frame only moves where it stays strictly between its neighbours in presentation order, checked against the whole window. Otherwise the grid re-anchors on that frame, or the frame keeps its own time.
+- `PulldownCadenceLatch` carries the verdict across the session's producers, so a producer started by a seek retimes from its first frame instead of waiting for its window.
+
+The producer's finish line counts `pulldownRetimed=` next to `onGrid=` and `offGrid=`.
 
 #### Seeks and the segment cache
 
@@ -446,12 +459,14 @@ audioOnly == true
    └─ otherwise ──► Demuxer ──► AudioDecoder ──► AVSampleBufferAudioRenderer ──► AVR / speakers
 ```
 
-**Now Playing on the audio host.** On tvOS and iOS the AVPlayer audio host owns a persistent per-player `MPNowPlayingSession` (exposed as `audioNowPlayingSession`). It keeps the system Now-Playing overlay bound to the app across a background pause, publishes now-playing info from the player automatically, and carries `externalMetadata`. The host survives across tracks and does not pause when the app goes to the background. All of this is gated `#if os(tvOS) || os(iOS)`. On macOS the path builds and plays without the system session; a macOS host drives Now-Playing through the shared centers itself.
+**Now Playing on the audio host.** On tvOS, iOS and visionOS the AVPlayer audio host owns a persistent per-player `MPNowPlayingSession` (exposed as `audioNowPlayingSession`). It keeps the system Now-Playing overlay bound to the app across a background pause, publishes now-playing info from the player automatically, and carries `externalMetadata`. The host survives across tracks and does not pause when the app goes to the background. macOS has no such session; there, and on the FFmpeg audio host everywhere, the engine publishes through the shared centers when the app set `ownsAudioNowPlaying` (see `AetherEngine+NowPlaying.swift`).
 
 **Now Playing on the video host.** The native video host can own the same kind of session, but only on request (`ownsVideoNowPlayingSession`, default off, read when a host is created). The difference is deliberate. The audio path is always a bare AVPlayer, but the video player is used both by custom-transport hosts and by `AVPlayerViewController` hosts, and AVKit owns Now-Playing there through its own private registration. A session claimed underneath AVKit costs that host its identity card and its working transport commands, so it is the host's call. When taken:
 
 - The session lives on `NativeAVPlayerHost`, so it survives native-to-native reloads with it (issue #15).
-- `setVideoNowPlayingInfo(_:)` stages the identity dictionary that is replayed onto every fresh `AVPlayerItem` (readiness-gate master reloads, media fallback, in-place PiP swaps).
+- `setNowPlayingInfo(_:)` (or `setVideoNowPlayingInfo(_:)`) stages the identity dictionary that is replayed onto every fresh `AVPlayerItem` (readiness-gate master reloads, media fallback, in-place PiP swaps).
+- `ownsVideoNowPlayingCommands` lets the engine bind the transport commands on the session's center; without it the host does.
+- On macOS no session exists, so the engine publishes the card on the shared centers instead.
 
 ### Audio tap (#95)
 
@@ -886,7 +901,7 @@ Which file owns what. Paths are relative to `Sources/AetherEngine/` unless noted
 | `AetherEngine+AudioShaping.swift` | `setAudioShaping(_:)`: audio shaping as a live setting. Each change is a session-preserving rebuild, with presses folded into the one in flight (AE#923). |
 | `AetherEngine+TeletextPage.swift` | `setTeletextPage(_:)`: the teletext caption page as a live setting. Rebuilds the drain decoder of each channel showing a teletext track and leaves others alone, so a page libzvbi does not flag as a subtitle page can be fixed without leaving the channel (#364). |
 | `AetherEngine+ScrubThumbnail.swift` | Scrub still for the active native session, decoded from bytes already in `SegmentCache`. Single-connection sources (debrid / torrent links) that refuse the `FrameExtractor`'s second demuxer still get previews (#106). |
-| `AetherEngine+SoftwareNowPlaying.swift` | Builds the software host's Now-Playing publisher when the app set `ownsSoftwareNowPlaying` (primary role only), and publishes `softwareNowPlayingActive`. |
+| `AetherEngine+NowPlaying.swift` | Builds the Now-Playing publisher of the route that loaded, from the app's opt-ins (`ownsSoftwareNowPlaying`, `ownsAudioNowPlaying`, `ownsVideoNowPlayingSession` + `ownsVideoNowPlayingCommands`; primary role only): commands on the route's `MPNowPlayingSession`, or card and commands on the shared centers where none exists. Keeps the card through a load seam, and takes part in `NowPlayingArbiter` on the shared centers. |
 | `SeekEvent.swift` | One statement about a seek's lifecycle (outcome plus its target). `isSeeking` / `seekTarget` are a level, and a level cannot say why it fell (#38 follow-up). |
 | `StartupProgress.swift` | The nine-checkpoint startup ladder behind `$startupProgress` (#361). See note. |
 | `SubtitleSessionCarryover.swift` | Subtitle state carried across an engine-initiated `reloadAtCurrentPosition` (AirPlay LAN swap, background-return reopen), which otherwise rebuilds the session from `LoadOptions` alone (#170). |
@@ -1135,7 +1150,8 @@ Notes:
 | `SeekResumeIntent.swift` | Whether a seek on a demuxer-driven host re-arms the clock at `lastRate` or parks it at 0, for the second seek issued inside the window its predecessor cleared (#292). |
 | `SoftwareBufferFrontier.swift` | How far ahead of the clock the software path really holds decoded video, and how that folds into the `bufferedPosition` a host reads (#303). |
 | `SoftwarePiPSource.swift` | Everything a host needs to build an `AVPictureInPictureController` content source around the software path without AVKit entering the engine: the layer plus the four transport answers behind the sample-buffer delegate. |
-| `SoftwareNowPlaying.swift` | Software-host Now-Playing: state-to-card mapping, remote-command routing and the publisher, behind small protocols for the two process-wide centers so tests run on fakes. Undoes only its own changes at stop. |
+| `SoftwareNowPlaying.swift` | The Now-Playing publisher every engine-owned route uses: state-to-card mapping, remote-command routing (track commands included) and the sink, behind small protocols for the info and command centers so tests run on fakes. Undoes only its own changes at stop. |
+| `NowPlayingArbiter.swift` | Which engine in the process holds the shared Now-Playing centers: the last one to claim (start playing, or `claimNowPlaying()`); waiting engines take over in claim order. |
 | `StartupReadinessGate.swift` | Outcome of one startup-readiness attempt: the reloaded item became playable, died, or ran out the settle window without doing either. |
 
 ### `Network/`
@@ -1218,6 +1234,8 @@ Notes:
 | `H264CompositionOffsetRepair.swift` | Rebuilds the presentation axis of an MP4 whose writer dropped `ctts` while the bitstream still reorders pictures (#409, HEVC #699). See note. |
 | `OutputTimestampSanitizer.swift` | Last-stage DTS/PTS monotonicity guard before the fMP4 mux (SSAI splices, program restarts). |
 | `CFRFrameGrid.swift` | Exact frame grid for a constant-rate VOD track on a coarse time base: the muxer's video time base and the slot each on-grid PTS/DTS lands on (AE#886). |
+| `PulldownCadenceRetimer.swift` | Puts 24p film carrying 2:3 pulldown timestamps onto the frame grid, one slot a frame, while the recent cadence is film (Sodalite#236) |
+| `SourceFrameRateMeasurement.swift` | Fits the frame rate to the head packets when the declared one is not a standard rate (Sodalite#236) |
 | `RestartCoalescer.swift` | Merges a burst of producer-restart requests into one in-flight and one settled target (rapid seeking, AetherEngine#35). |
 | `LiveWindow.swift` | Live path: session-relative DVR timeline (seconds since the first frame), shared by the native and software live paths. |
 | `MP4SegmentMuxer.swift` | Native path: session-long fragmented-MP4 muxer (`+empty_moov+default_base_moof+frag_custom+delay_moov`). |

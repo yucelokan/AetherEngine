@@ -1,32 +1,14 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-12. Integration base: upstream 7.58.0
-(`7ea27bff8d8fb4a457d6e0042b0537eb31253583`).
+Updated: 2026-11-12. Integration base: upstream 7.63.0
+(`f81a8b5bac6b91b323d6f5b40a091906f35eb787`).
 
 ## Current differences
 
-Three changes: one engine change taken from upstream ahead of its release, one engine change
-offered upstream and not merged there yet, and one test change, not offered upstream yet.
-Otherwise the source matches 7.58.0 exactly, and this file and `COPYING.GPL3` are the only other
-additions. Fixes made here are generic and go upstream as pull requests.
+Two changes: one engine change offered upstream and not merged there yet, and one test change, not
+offered upstream yet. Otherwise the source matches 7.63.0 exactly, and this file and `COPYING.GPL3`
+are the only other additions. Fixes made here are generic and go upstream as pull requests.
 
-- The MPEG-TS header wait for a PAT program that never sends its PMT (2026-11-11): `Demuxer`
-  releases `AVFMTCTX_NOHEADER` from its interrupt callback after 2.5 s of stream analysis that
-  received data (a stall counts as at most 0.5 s) when one program still has no PMT and another has
-  its PMT and an audio or video stream, and the `open timings` line reports how the analysis ended
-  (`stop`, `unresolved`, `programs`, `pmtMissing`, `headerWait`, `probeBytes`, `closeToReturn`).
-  Upstream: [#1020](https://github.com/superuser404notfound/AetherEngine/pull/1020) (merged as
-  `b8b50f6cdc3aac6824e23909b12ea81a3c8b994e`), the maintainer's follow-up
-  `b7e59a37f396025296ed852393967f23d36051c3` (the window runs on time the input delivered data,
-  `stop=complete` became `stop=resolved`, cherry-picked here), and
-  [#1038](https://github.com/superuser404notfound/AetherEngine/pull/1038) (merged as
-  `63937c0bd5b2e430318965751a79c9bf76913c86`: only audio and video make a program ready). None of
-  the three is in a release yet; 7.62.1 does not carry them. The header-wait code and its tests are
-  identical to upstream's; the docs differ only where the 7.58.0 docs layout does. Files:
-  `Sources/AetherEngine/Demuxer/Demuxer.swift`,
-  `Tests/AetherEngineTests/MissingPMTProbeReleaseTests.swift`, `DocumentedConstantsTests.swift`,
-  `docs/api.md`, `docs/formats.md`, `CHANGELOG.md`. Drop this entry and take upstream's version at
-  the integration of the first release that carries all three.
 - The software decoder's playback thread cap (2026-11-12): `SoftwareVideoDecoder` decodes on at most
   16 threads (`playbackThreadCount`), where libavcodec's automatic choice stops, so a Mac with more
   than 16 cores no longer holds more frames back in frame threading than libavcodec recommends (an
@@ -44,14 +26,20 @@ additions. Fixes made here are generic and go upstream as pull requests.
   suite run has passed it. Files: `Sources/AetherEngine/Audio/Spatial/APACEncodePipeline.swift`,
   `Tests/AetherEngineTests/APACEncodePipelineTests.swift`, `CHANGELOG.md`.
 
-The fork's earlier upscale change (`DeferredFrameUpscaler`, 721b9ebc: the stage built off the main
-actor, frames passing through until it is ready) was never offered upstream. Upstream fixed the
-same freeze itself in 7.58.0 (AE#846: the stage builds on its own queue, a stage that cannot be
-built switches itself off), and this integration takes upstream's version and drops the fork's.
+Released upstream since the previous integration: the MPEG-TS header wait for a PAT program that
+never sends its PMT, which the fork carried ahead of its release from 2026-11-11, is in 7.63.0:
+[#1020](https://github.com/superuser404notfound/AetherEngine/pull/1020) (merged as
+`b8b50f6cdc3aac6824e23909b12ea81a3c8b994e`), the maintainer's follow-up
+`b7e59a37f396025296ed852393967f23d36051c3` and
+[#1038](https://github.com/superuser404notfound/AetherEngine/pull/1038) (merged as
+`63937c0bd5b2e430318965751a79c9bf76913c86`). This integration takes upstream's `Demuxer.swift`,
+tests, docs and changelog entry for it, so the fork's entry is gone.
 
-Released upstream since the previous integration: the session callback release (PR #922, merge
-`74f3a674d3cc18362a4d8c2f63e03f28259b9539`, in 7.52.0) and HLS byte-range segments (PR #928,
-merge `a1a6508b`, in 7.53.0).
+The fork's earlier upscale change (`DeferredFrameUpscaler`, 721b9ebc) was never offered upstream.
+Upstream fixed the same freeze itself in 7.58.0 (AE#846), and the 7.58.0 integration took
+upstream's version and dropped the fork's. Earlier releases carried the session callback release
+(PR #922, merge `74f3a674d3cc18362a4d8c2f63e03f28259b9539`, in 7.52.0) and HLS byte-range segments
+(PR #928, merge `a1a6508b`, in 7.53.0).
 
 The fork's source-failure diagnostics landed upstream as PR #818
 (merge `aa0bf3b3bda200196b8ad0edaf7481a5fe12cc3a`, released in 7.48.0), including its
@@ -97,7 +85,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.54.0 integration.
+and is included in the current 7.63.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

@@ -5,11 +5,28 @@ Updated: 2026-11-12. Integration base: upstream 7.58.0
 
 ## Current differences
 
-Two changes: one engine change, offered upstream and not merged there yet, and one test change,
-not offered upstream yet. Otherwise the source matches 7.58.0 exactly, and this file and
-`COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as pull
-requests.
+Three changes: one engine change taken from upstream ahead of its release, one engine change
+offered upstream and not merged there yet, and one test change, not offered upstream yet.
+Otherwise the source matches 7.58.0 exactly, and this file and `COPYING.GPL3` are the only other
+additions. Fixes made here are generic and go upstream as pull requests.
 
+- The MPEG-TS header wait for a PAT program that never sends its PMT (2026-11-11): `Demuxer`
+  releases `AVFMTCTX_NOHEADER` from its interrupt callback after 2.5 s of stream analysis that
+  received data (a stall counts as at most 0.5 s) when one program still has no PMT and another has
+  its PMT and an audio or video stream, and the `open timings` line reports how the analysis ended
+  (`stop`, `unresolved`, `programs`, `pmtMissing`, `headerWait`, `probeBytes`, `closeToReturn`).
+  Upstream: [#1020](https://github.com/superuser404notfound/AetherEngine/pull/1020) (merged as
+  `b8b50f6cdc3aac6824e23909b12ea81a3c8b994e`), the maintainer's follow-up
+  `b7e59a37f396025296ed852393967f23d36051c3` (the window runs on time the input delivered data,
+  `stop=complete` became `stop=resolved`, cherry-picked here), and
+  [#1038](https://github.com/superuser404notfound/AetherEngine/pull/1038) (merged as
+  `63937c0bd5b2e430318965751a79c9bf76913c86`: only audio and video make a program ready). None of
+  the three is in a release yet; 7.62.1 does not carry them. The header-wait code and its tests are
+  identical to upstream's; the docs differ only where the 7.58.0 docs layout does. Files:
+  `Sources/AetherEngine/Demuxer/Demuxer.swift`,
+  `Tests/AetherEngineTests/MissingPMTProbeReleaseTests.swift`, `DocumentedConstantsTests.swift`,
+  `docs/api.md`, `docs/formats.md`, `CHANGELOG.md`. Drop this entry and take upstream's version at
+  the integration of the first release that carries all three.
 - The software decoder's playback thread cap (2026-11-12): `SoftwareVideoDecoder` decodes on at most
   16 threads (`playbackThreadCount`), where libavcodec's automatic choice stops, so a Mac with more
   than 16 cores no longer holds more frames back in frame threading than libavcodec recommends (an

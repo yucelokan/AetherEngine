@@ -27,7 +27,7 @@ final class APACEncodePipeline: SpatialBedSink, @unchecked Sendable {
     let leadingFrames: Int
     let magicCookie: Data
 
-    private let encoder: APACEncoder
+    private let encoder: any APACPacketEncoding
     private let queue = DispatchQueue(label: "AetherEngine.SpatialAudioBridge.encode")
 
     /// Guards everything below it.
@@ -44,7 +44,7 @@ final class APACEncodePipeline: SpatialBedSink, @unchecked Sendable {
     private var packetsInRun: Int64 = 0
 
     /// `bufferCount` buffers in all: one the caller renders into, the rest queued or encoding.
-    init(encoder: APACEncoder, channels: Int, bufferFrames: Int, bufferCount: Int = 3) {
+    init(encoder: any APACPacketEncoding, channels: Int, bufferFrames: Int, bufferCount: Int = 3) {
         precondition(bufferCount >= 2, "one buffer to render into and one to encode")
         self.encoder = encoder
         leadingFrames = encoder.leadingFrames
@@ -209,7 +209,24 @@ final class APACEncodePipeline: SpatialBedSink, @unchecked Sendable {
     }
 }
 
+/// The encoder surface the pipeline drives. `APACEncoder` is the only production conformer. The
+/// seam exists so a test can wrap the real encoder and record what it receives and returns on the
+/// worker: Apple's APAC encoder is not byte-reproducible across threads (macOS 27.0.1 returns one
+/// of two streams for the same input, 851,362 or 851,540 bytes over 40 chunks of 7.1.4, depending
+/// on the thread and the process's history), so a second encode on another thread is no reference.
 @available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
-private extension APACEncoder {
-    func flushIgnoringErrors() -> [Packet] { (try? flush()) ?? [] }
+protocol APACPacketEncoding: AnyObject {
+    var leadingFrames: Int { get }
+    var magicCookie: Data { get }
+    func encode(planes: [UnsafePointer<Float>], frameCount: Int) throws -> [APACEncoder.Packet]
+    func flush() throws -> [APACEncoder.Packet]
+    func reset()
+}
+
+@available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+extension APACEncoder: APACPacketEncoding {}
+
+@available(macOS 26.0, iOS 26.0, tvOS 26.0, visionOS 26.0, *)
+private extension APACPacketEncoding {
+    func flushIgnoringErrors() -> [APACEncoder.Packet] { (try? flush()) ?? [] }
 }

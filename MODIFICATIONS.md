@@ -1,12 +1,22 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-06. Integration base: upstream 7.58.0
+Updated: 2026-11-12. Integration base: upstream 7.58.0
 (`7ea27bff8d8fb4a457d6e0042b0537eb31253583`).
 
 ## Current differences
 
-None in the engine: the source matches 7.58.0 exactly; this file and `COPYING.GPL3` are the only
-additions. Fixes made here are generic and go upstream as pull requests.
+One engine change, offered upstream and not merged there yet; otherwise the source matches 7.58.0
+exactly, and this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic
+and go upstream as pull requests.
+
+- The software decoder's playback thread cap (2026-11-12): `SoftwareVideoDecoder` decodes on at most
+  16 threads (`playbackThreadCount`), where libavcodec's automatic choice stops, so a Mac with more
+  than 16 cores no longer holds more frames back in frame threading than libavcodec recommends (an
+  18-core Mac held 17). Upstream:
+  [#1042](https://github.com/superuser404notfound/AetherEngine/pull/1042) (open). The code and
+  tests are identical to upstream's. Files: `Sources/AetherEngine/Decoder/SoftwareVideoDecoder.swift`,
+  `Tests/AetherEngineTests/Issue220SoftwareDecoderDrainTests.swift`, `CHANGELOG.md`. Drop this entry
+  and take upstream's version at the integration of the first release that carries it.
 
 The fork's earlier upscale change (`DeferredFrameUpscaler`, 721b9ebc: the stage built off the main
 actor, frames passing through until it is ready) was never offered upstream. Upstream fixed the

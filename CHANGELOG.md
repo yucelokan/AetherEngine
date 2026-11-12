@@ -12,13 +12,13 @@ the public-API contract.
 
 ### Fixed
 
-- **On a Mac with more than 16 cores the software decoder held more frames back than libavcodec
-  recommends.** The decoder opened with one thread per core, and under frame threading every thread
-  past the first holds a frame until more packets arrive. On an 18-core Mac (Mac17,6) that was 17
-  frames: a 40-packet progressive H.264 delivered 23 frames, and a Live source whose reads stalled
-  kept frames it had already received inside the decoder instead of on screen. Playback now decodes
-  on at most 16 threads, where libavcodec's own automatic choice stops and above which it warns.
-  Apple TV, iPhone and iPad have fewer cores and are unchanged.
+- **A Mac with more than 16 cores decoded software video on more threads than libavcodec recommends.**
+  The decoder opened with one thread per core, and under frame threading every thread past the first
+  holds a decoded frame until more packets arrive: 17 frames on an 18-core Mac (Mac17,6), where a
+  40-packet progressive H.264 delivered 23 frames and a Live source whose reads stalled kept 17
+  received frames off the screen. Playback now decodes on at most 16 threads, where libavcodec's own
+  automatic choice stops and above which it warns, so such a Mac holds at most 15, as a 16-core one
+  already did. Apple TV, iPhone and iPad have fewer cores and are unchanged.
 
 - **A live MPEG-TS whose PAT lists a program that never sends its PMT no longer reads the whole
   probe budget before it plays.** The TS demuxer keeps waiting for a header until every listed

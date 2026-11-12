@@ -1,12 +1,12 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-12. Integration base: upstream 7.63.0
-(`f81a8b5bac6b91b323d6f5b40a091906f35eb787`).
+Updated: 2026-11-12. Integration base: upstream 7.64.0
+(`b0d91055ba6042c74b6adf4036e4a87731b214ba`).
 
 ## Current differences
 
 Two changes: one engine change offered upstream and not merged there yet, and one test change, not
-offered upstream yet. Otherwise the source matches 7.63.0 exactly, and this file and `COPYING.GPL3`
+offered upstream yet. Otherwise the source matches 7.64.0 exactly, and this file and `COPYING.GPL3`
 are the only other additions. Fixes made here are generic and go upstream as pull requests.
 
 - The software decoder's playback thread cap (2026-11-12): `SoftwareVideoDecoder` decodes on at most
@@ -26,8 +26,8 @@ are the only other additions. Fixes made here are generic and go upstream as pul
   suite run has passed it. Files: `Sources/AetherEngine/Audio/Spatial/APACEncodePipeline.swift`,
   `Tests/AetherEngineTests/APACEncodePipelineTests.swift`, `CHANGELOG.md`.
 
-Released upstream since the previous integration: the MPEG-TS header wait for a PAT program that
-never sends its PMT, which the fork carried ahead of its release from 2026-11-11, is in 7.63.0:
+Released upstream in 7.63.0, integrated just before 7.64.0: the MPEG-TS header wait for a PAT
+program that never sends its PMT, which the fork carried ahead of its release from 2026-11-11:
 [#1020](https://github.com/superuser404notfound/AetherEngine/pull/1020) (merged as
 `b8b50f6cdc3aac6824e23909b12ea81a3c8b994e`), the maintainer's follow-up
 `b7e59a37f396025296ed852393967f23d36051c3` and
@@ -85,7 +85,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.63.0 integration.
+and is included in the current 7.64.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

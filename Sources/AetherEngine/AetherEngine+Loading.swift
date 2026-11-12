@@ -335,7 +335,7 @@ extension AetherEngine {
     /// a host preserved across a native->native reload (issue #15) keeps what it was created with,
     /// which is the point, since re-creating it is what breaks AVKit's MediaRemote registration.
     func makeNativeHost() -> NativeAVPlayerHost {
-        #if os(tvOS) || os(iOS)
+        #if os(iOS) || os(tvOS) || os(visionOS)
         let host = NativeAVPlayerHost(ownsNowPlayingSession: Self.ownsNowPlaying(
             hostOptIn: ownsVideoNowPlayingSession, role: loadedOptions.sharedOutputRole))
         #else
@@ -360,17 +360,21 @@ extension AetherEngine {
         return host
     }
 
-    /// Replay the staged Now-Playing identity onto a host, and re-assert session ownership. The
-    /// re-assert mirrors the audio path: a preserved host never re-runs init, so a session another
-    /// app took over in the meantime would otherwise never be claimed back. Both no-op for a host
-    /// that owns no session.
+    /// Replay the staged Now-Playing identity onto a host, re-assert session ownership, and start the
+    /// engine's publisher for the route. The re-assert mirrors the audio path: a preserved host never
+    /// re-runs init, so a session another app took over in the meantime would otherwise never be
+    /// claimed back. The first two no-op for a host that owns no session.
     func replayVideoNowPlayingInfo(to host: NativeAVPlayerHost) {
-        #if os(tvOS) || os(iOS)
-        guard host.ownsNowPlayingSession else { return }
-        if !pendingVideoNowPlayingInfo.isEmpty {
-            host.setNowPlayingInfo(pendingVideoNowPlayingInfo)
+        #if os(iOS) || os(tvOS) || os(visionOS)
+        if host.ownsNowPlayingSession {
+            if !pendingVideoNowPlayingInfo.isEmpty {
+                host.setNowPlayingInfo(pendingVideoNowPlayingInfo)
+            }
+            host.becomeActiveNowPlaying()
         }
-        host.becomeActiveNowPlaying()
+        startNowPlayingPublisher(.nativeVideo, sessionCenter: host.nowPlayingSession?.remoteCommandCenter)
+        #else
+        startNowPlayingPublisher(.nativeVideo, sessionCenter: nil)
         #endif
     }
 
@@ -841,6 +845,7 @@ extension AetherEngine {
         forceDolbyVisionOnNonDVDisplay: Bool = false,
         dolbyVisionHandling: DolbyVisionHandling = .automatic,
         dolbyVisionRPUProfile: Int? = nil,
+        measuredFrameRate: AVRational? = nil,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
         sessionDisplayCaps: DisplayCapabilities,
@@ -919,6 +924,7 @@ extension AetherEngine {
             forceDolbyVisionOnNonDVDisplay: forceDolbyVisionOnNonDVDisplay,
             dolbyVisionHandling: dolbyVisionHandling,
             dolbyVisionRPUProfile: dolbyVisionRPUProfile,
+            measuredFrameRate: measuredFrameRate,
             matchContentEnabled: matchContentEnabled,
             panelIsInHDRMode: panelIsInHDRMode,
             audioSourceStreamIndexOverride: audioSourceStreamIndex,
@@ -2316,6 +2322,7 @@ extension AetherEngine {
         let host = AudioPlaybackHost()
         host.audioShaping = loadedOptions.audioShaping
         self.audioHost = host
+        startNowPlayingPublisher(.audioFFmpeg, sessionCenter: nil)
         applyDesiredVolume(to: host)
         applyDesiredRate(to: host)
         self.playlistShiftSeconds = 0
@@ -2404,8 +2411,11 @@ extension AetherEngine {
         // so the Home badge + remote commands stay bound across a pause.
         host.becomeActiveNowPlaying()
         host.setExternalMetadata(pendingExternalMetadata)
-        #if os(iOS) || os(tvOS)
+        #if os(iOS) || os(tvOS) || os(visionOS)
         host.setNowPlayingInfo(pendingAudioNowPlayingInfo)
+        startNowPlayingPublisher(.audioAVPlayer, sessionCenter: host.nowPlayingSession.remoteCommandCenter)
+        #else
+        startNowPlayingPublisher(.audioAVPlayer, sessionCenter: nil)
         #endif
 
         audioNativeCancellables.removeAll()
@@ -2866,6 +2876,7 @@ extension AetherEngine {
                     // AE#532: the verdict the load reached, not a second audit: the source has not
                     // changed and the probe that could answer it is gone.
                     dolbyVisionRPUProfile: sourceDolbyVisionRPUProfile,
+                    measuredFrameRate: sourceMeasuredFrameRate,
                     matchContentEnabled: loadedOptions.matchContentEnabled,
                     panelIsInHDRMode: reloadRoutingPanelHDR,
                     // AE#535: the load's table, for the same reason as the panel answer above.

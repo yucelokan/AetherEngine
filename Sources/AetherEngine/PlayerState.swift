@@ -28,9 +28,10 @@ public enum PlaybackBackend: String, Sendable, Equatable {
     case none
     /// Removed in 1.0.0; reserved for hosts that still switch on it.
     case aether
-    /// HLS-fMP4 over loopback to AVPlayer + AVPlayerLayer. Default for HEVC / H.264 / VP9.
+    /// HLS-fMP4 over loopback to AVPlayer + AVPlayerLayer. Default for HEVC, H.264 and hardware-decodable AV1.
     case native
-    /// FFmpeg / dav1d + AVSampleBufferDisplayLayer. Used for AV1 on tvOS (no HW decoder).
+    /// FFmpeg / dav1d + AVSampleBufferDisplayLayer. Every codec or shape the native route does not carry
+    /// (AV1 without a hardware decoder, VP9, MPEG-2, VC-1, interlaced H.264, FEL dual layer, ...).
     case software
     /// FFmpeg audio + AVSampleBufferAudioRenderer. No video pipeline.
     case audio
@@ -116,7 +117,9 @@ public enum AudioDelivery: String, Sendable, Equatable, CaseIterable {
     /// a TrueHD-MAT or JOC bitstream does not survive its PCM intermediate; under
     /// `LoadOptions.objectAudioRendering`, in a build with the `TrueHDObjectAudio` / `DTSXObjectAudio`
     /// traits (off by default), TrueHD Atmos and DTS:X are rendered with their objects and heights into a
-    /// speaker bed and encoded as APAC instead, on the loopback route and on the software host alike.
+    /// speaker bed instead, delivered as linear PCM or, over AirPlay (or when forced), as APAC, on the
+    /// loopback route and on the software host alike. On tvOS the software host also decodes an E-AC-3
+    /// JOC track to a PCM bed through the system's Atmos decoder (AE#995) and reports this case.
     case bridged
     /// libavcodec decodes the audio to PCM and the engine renders it itself (the software path without an
     /// object-audio route, and the software audio-only host).
@@ -1151,6 +1154,13 @@ public struct LoadOptions: Sendable, Equatable {
     /// external registry id-exactly instead of re-registering `externalSubtitles`, and the
     /// host's subtitle authority flag carries over. Consumed by the load; never persisted.
     var subtitleSessionCarryover: SubtitleSessionCarryover? = nil
+
+    /// ENGINE-INTERNAL: the engine read this URL's body and found an HLS playlist (the AE#154 / AE#246
+    /// reroute), which is why the session runs on the `nativeRemoteHLS` bypass. Not settable from the
+    /// public initializer. The bypass then declares the HLS MIME type on the asset, because AVFoundation
+    /// types a URL by its path extension and `Content-Type` and never by its body. Rides `loadedOptions`,
+    /// so every rebuild of a rerouted session keeps the declaration.
+    var hlsPlaylistProvenByBody: Bool = false
 
     public init(
         omitCriteriaColorExtensions: Bool = false,

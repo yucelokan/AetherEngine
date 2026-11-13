@@ -1864,7 +1864,7 @@ public final class AetherEngine: ObservableObject {
     /// Fires when a live session cannot continue through its bounded in-engine source reopen.
     /// A verified replay first reopens a supported source while retaining its cache and packet
     /// history. When fresh negotiation is needed, production is parked and the host must call
-    /// `load` with a fresh source under its bounded retune policy. Subscribe per session.
+    /// `load` with a fresh source under its bounded retune policy. One subscription per engine, no replay.
     public let liveSourceReset = PassthroughSubject<Void, Never>()
 
     /// Bounded recovery could not find new media after a verified replay. Cached DVR media
@@ -1872,7 +1872,7 @@ public final class AetherEngine: ObservableObject {
     /// broadcast to play again. The host can retry with `retryLiveSourceRecovery()` after
     /// its own backoff; this is not a codec failure. Fires only under
     /// `LoadOptions.hostRetriesExhaustedLiveReplay`; otherwise the exhaustion is a `liveSourceReset`.
-    /// Subscribe per session.
+    /// One subscription per engine, no replay.
     public let liveSourceReplayExhausted = PassthroughSubject<Void, Never>()
 
     /// Resume a parked live source without replacing the consumer item, DVR cache or replay
@@ -1898,7 +1898,7 @@ public final class AetherEngine: ObservableObject {
     /// Measured on the harness with a 30 s window, a session paused for 70 s: the playhead sat at
     /// 93881.2 while the window slid to 93890.0...93920.0 underneath it, and the resume landed at
     /// 93895.0 without a word. A viewer who paused a match and came back saw it continue somewhere
-    /// else, and nothing on screen said why. No replay; subscribe per session.
+    /// else, and nothing on screen said why. No replay; one subscription per engine.
     public let liveResumeClamped = PassthroughSubject<LiveResumeClamp, Never>()
 
     /// Fires when the SYSTEM turned captions on by itself, i.e. selected a legible option in the item that
@@ -1909,14 +1909,14 @@ public final class AetherEngine: ObservableObject {
     /// The engine still deselects the option (its renditions exist for PiP, AirPlay and external screens,
     /// and rendering them in fullscreen draws a caption box over the host's own subtitles). A host that
     /// wants the behaviour renders the request itself: it knows which of the three triggers plausibly
-    /// fired and which of its own tracks matches. No replay; subscribe per session.
+    /// fired and which of its own tracks matches. No replay; one subscription per engine.
     public let systemCaptionRequest = PassthroughSubject<SystemCaptionRequest, Never>()
 
     /// Fires when a native session AVPlayer refused on its merits is rebuilt on the software path
     /// (AE#561), carrying the failure the rebuild absorbed. Without it a host sees only `videoRoute`
     /// change, which a host re-planning failing titles itself cannot tell from a routing decision
     /// (AE#629). `LoadOptions.escalatesToSoftwarePath = false` declines the rebuild instead. No
-    /// replay; subscribe per session.
+    /// replay; one subscription per engine.
     public let softwarePathEscalations = PassthroughSubject<SoftwarePathEscalationEvent, Never>()
 
     // MARK: - Scrub thumbnails
@@ -4525,18 +4525,16 @@ public final class AetherEngine: ObservableObject {
     ///
     /// Behavior:
     /// 1. Tears down the previous session.
-    /// 2. Briefly opens the demuxer to detect format + frame rate.
-    /// 3. Programs `AVDisplayCriteria` from the detected metadata
-    ///    (DV → `dvh1`, others → `hvc1`; refresh rate snapped to a
-    ///    standard rate; honors Match Content + Match Frame Rate).
-    /// 4. Waits for the panel mode-switch to settle.
-    /// 5. Spins up `HLSVideoEngine` + `NativeAVPlayerHost`.
+    /// 2. Opens the source to detect format, frame rate and dynamic range.
+    /// 3. Routes it: HEVC, H.264 and hardware-decodable AV1 go to the native route
+    ///    (`HLSVideoEngine` + `NativeAVPlayerHost`); everything else the native route does not
+    ///    carry goes to `SoftwarePlaybackHost`; audio-only sources to an audio host.
+    /// 4. Programs display criteria (unless the host owns them, see `displayCriteriaOwner`) and
+    ///    waits for the panel's mode switch.
     ///
-    /// VP9 / AV1 sources gate on a runtime VideoToolbox capability
-    /// probe; on hardware that can't decode them, the engine throws
-    /// `HLSVideoEngine.HLSVideoEngineError.unsupportedCodec` and the
-    /// host should surface that to the user. Dolby Vision Profile 7
-    /// (dual-layer) and Profile 8.2 (SDR base) similarly throw.
+    /// A codec with no decoder in the linked FFmpeg build fails the load with
+    /// `unsupportedCodec`. Per-format behaviour, Dolby Vision profiles included, is in
+    /// `docs/formats.md`.
     ///
     /// - Parameters:
     ///   - url: Media source (http/https/file).
@@ -5397,6 +5395,9 @@ public final class AetherEngine: ObservableObject {
             }
             EngineLog.emit("[AetherEngine] AE#154: HLS playlist on the VOD loopback path; rerouting to the native remote-HLS bypass", category: .engine)
             loadedOptions.nativeRemoteHLS = true
+            // The body is the evidence: the URL that carried it may say .mp4 or nothing at all, and the
+            // origin may type it video/mp4, which AVFoundation refuses before reading a byte (-11829).
+            loadedOptions.hlsPlaylistProvenByBody = true
             // #316: the reroute returns before the registration below, same as the direct bypass.
             registerDeclaredExternalSubtitles(loadedOptions)
             recordStartupCheckpoint(.routed, generation: startupGen)   // #361
@@ -6518,6 +6519,7 @@ public final class AetherEngine: ObservableObject {
                 )
                 var rerouted = loadedOptions
                 rerouted.nativeRemoteHLS = true
+                rerouted.hlsPlaylistProvenByBody = true
                 continueStartupAcrossReroute()   // #361, same wait, different route
                 _ = try await load(source: .url(hlsURL), startPosition: startPosition, options: rerouted)
                 return nil

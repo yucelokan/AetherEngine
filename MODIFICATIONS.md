@@ -1,22 +1,14 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-12. Integration base: upstream 7.64.0
-(`b0d91055ba6042c74b6adf4036e4a87731b214ba`).
+Updated: 2026-11-13. Integration base: upstream 7.65.0
+(`260af699baf5b2c3baa2015bcf80231bb3cf77e3`).
 
 ## Current differences
 
-Two changes: one engine change offered upstream and not merged there yet, and one test change, not
-offered upstream yet. Otherwise the source matches 7.64.0 exactly, and this file and `COPYING.GPL3`
-are the only other additions. Fixes made here are generic and go upstream as pull requests.
+One change, a test change not offered upstream yet. Otherwise the source matches 7.65.0 exactly,
+and this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and go
+upstream as pull requests.
 
-- The software decoder's playback thread cap (2026-11-12): `SoftwareVideoDecoder` decodes on at most
-  16 threads (`playbackThreadCount`), where libavcodec's automatic choice stops, so a Mac with more
-  than 16 cores no longer holds more frames back in frame threading than libavcodec recommends (an
-  18-core Mac held 17). Upstream:
-  [#1042](https://github.com/superuser404notfound/AetherEngine/pull/1042) (open). The code and
-  tests are identical to upstream's. Files: `Sources/AetherEngine/Decoder/SoftwareVideoDecoder.swift`,
-  `Tests/AetherEngineTests/FrameDecodeThreadBudgetTests.swift`, `CHANGELOG.md`. Drop this entry
-  and take upstream's version at the integration of the first release that carries it.
 - The APAC encode pipeline test's reference (2026-11-12): `APACEncodePipelineTests` no longer
   compares the pipeline with a second APAC encode on the test thread, because Apple's APAC encoder
   is not byte-reproducible across threads (macOS 27.0.1 gives one of two streams, 851,362 or
@@ -25,6 +17,15 @@ are the only other additions. Fixes made here are generic and go upstream as pul
   packets it returns. No change in playback. Upstream: not offered yet; it goes upstream once a
   suite run has passed it. Files: `Sources/AetherEngine/Audio/Spatial/APACEncodePipeline.swift`,
   `Tests/AetherEngineTests/APACEncodePipelineTests.swift`, `CHANGELOG.md`.
+
+Released upstream in 7.65.0: the software decoder's playback thread cap, which the fork carried from
+2026-11-12 (`SoftwareVideoDecoder` decodes on at most 16 threads):
+[#1042](https://github.com/superuser404notfound/AetherEngine/pull/1042) (merged as
+`75c08e8e`). This integration takes upstream's decoder, tests and changelog entry, so the fork's
+entry is gone. The same release carries the HLS MIME declaration on the AE#154 reroute, offered from
+the fork (fork PR #2, never merged into `develop`):
+[#1040](https://github.com/superuser404notfound/AetherEngine/pull/1040) (merged as `50bae75a`).
+The fork takes it from upstream, so fork PR #2 is superseded.
 
 Released upstream in 7.63.0, integrated just before 7.64.0: the MPEG-TS header wait for a PAT
 program that never sends its PMT, which the fork carried ahead of its release from 2026-11-11:
@@ -85,7 +86,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.64.0 integration.
+and is included in the current 7.65.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

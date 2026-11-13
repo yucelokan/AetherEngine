@@ -56,7 +56,8 @@ struct AudioShapingSwitchRequest {
 }
 
 /// `off`, or a comma list of `ch=N`, `dialogue=DB`, `night` (the engine's night preset),
-/// `gain=DB` (a plain gain: a 1:1 compressor with that makeup) and `loudness=LUFS` (AE#1036).
+/// `gain=DB` (a plain gain: a 1:1 compressor with that makeup), `loudness=LUFS` (AE#1036) and
+/// `lfe=DB` (the LFE level in a fold that drops it, AE#1044).
 func parseAudioShapingSpec(_ spec: String) -> AudioShaping? {
     var shaping = AudioShaping()
     guard spec != "off" else { return shaping }
@@ -70,6 +71,7 @@ func parseAudioShapingSpec(_ spec: String) -> AudioShaping? {
             guard let db = Double(v) else { return nil }
             shaping.compressor = .init(thresholdDB: 0, ratio: 1, makeupGainDB: db)
         case ("loudness", let v?): guard let lufs = Double(v) else { return nil }; shaping.loudnessTargetLUFS = lufs
+        case ("lfe", let v?): guard let db = Double(v) else { return nil }; shaping.lfeMixDB = db
         default: return nil
         }
     }
@@ -836,15 +838,17 @@ private func playSmokeTest(url: URL, seconds: Double, live: Bool, forceSoftware:
             // exists (the foreground retune's hold-paused policy). Resumed at tick 8.
             print("  HOSTCALL pause() right after load")
             engine.pause()
-        case "reloadlive", "reloadnext", "seekback", "overlapseek", "ratehold-tail", "pauseseek", "pausehold", "still", "stallclock", "pausereload", "playreload", "extplayreload":
+        case "reloadlive", "reloadnext", "seekback", "overlapseek", "pauseseek", "pausehold", "still", "stallclock", "pausereload", "playreload", "extplayreload":
             break  // reloadlive handled at load time, seekback/overlapseek/pauseseek in the telemetry loop
         case "nativesubs":
             break  // Sodalite#156, read at load time into LoadOptions.prepareNativeSubtitles
+        case "subsatload":
+            break  // read at load time, picks the --subs track before the first tick
         case let call where call.hasPrefix("seekfar") || call.hasPrefix("subsoff")
             || call.hasPrefix("subson") || call.hasPrefix("nativerender") || call.hasPrefix("lanreload"):
             break  // #433 / Sodalite#156, all in the telemetry loop; `@N` picks the tick
         default:
-            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,reloadnext,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock,pausereload,playreload,extplayreload,nativesubs,nativerender,subsoff,subson)")
+            print("  HOSTCALL unknown '\(call)' (use play,extractor,setrate,ratehold,pausestart,reloadlive,reloadnext,seekback,seekfar,overlapseek,pauseseek,pausehold,still,stallclock,pausereload,playreload,extplayreload,nativesubs,nativerender,subsoff,subson,subsatload,lanreload)")
         }
     }
     defer { if let frameExtractor { Task { await frameExtractor.shutdown() } } }

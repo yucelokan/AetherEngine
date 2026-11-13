@@ -10,16 +10,6 @@ the public-API contract.
 
 ## [Unreleased]
 
-### Fixed
-
-- **A Mac with more than 16 cores decoded software video on more threads than libavcodec recommends.**
-  The decoder opened with one thread per core, and under frame threading every thread past the first
-  holds a decoded frame until more packets arrive: 17 frames on an 18-core Mac (Mac17,6), where a
-  40-packet progressive H.264 delivered 23 frames and a Live source whose reads stalled kept 17
-  received frames off the screen. Playback now decodes on at most 16 threads, where libavcodec's own
-  automatic choice stops and above which it warns, so such a Mac holds at most 15, as a 16-core one
-  already did. Apple TV, iPhone and iPad have fewer cores and are unchanged.
-
 ### Tests and CI
 
 - **The APAC encode pipeline test no longer expects Apple's encoder to give the same bytes on two threads.**
@@ -29,6 +19,77 @@ the public-API contract.
   failed with an exact pipeline. It now wraps the real encoder through an internal `APACPacketEncoding`
   protocol and checks byte for byte that every rendered chunk reached the encoder in order and that the
   pipeline's packets are the encoder's own, in order, on their timestamps. No change in playback.
+
+## [7.65.0] - 2026-11-12
+
+### Added
+
+- **A stereo downmix can keep the LFE (AE#1044).** `AudioShaping.lfeMixDB` mixes the LFE into the fold
+  when a `maxChannels` cap leaves the output without one, so `AudioShaping(maxChannels: 2, lfeMixDB: 0)`
+  feeds the subwoofer of a 2.1 system behind a stereo link. nil drops the LFE as before. On its own,
+  without a cap, it changes nothing and triggers no rebuild.
+
+- **The remaining integer and float PCM shapes and MPEG-1 Layer I audio play with sound (FFmpegBuild 3.15.0).**
+  A 24-bit big-endian PCM track (what camera MOVs record), 32-bit integer PCM (WAV, MOV), big-endian and 64-bit
+  float PCM, signed 8-bit PCM, and MPEG-1 Layer I had no decoder in the FFmpeg build, so inside a video file the picture played
+  without sound and `audioDelivery` read `.droppedNoPipeline`. They now decode and go through the audio
+  bridge like the other PCM shapes and MP2.
+- **The documentation is reorganised so readers find the answer first, and rewritten to be read without
+  background.** `docs/architecture.md` is now a short overview with a component diagram; the depth lives in
+  `docs/architecture-native.md`, `docs/architecture-software.md` and `docs/source-map.md`. `docs/formats.md`
+  opens with an at-a-glance table (does it play, and on which route) and is the one routing reference.
+  `docs/cli.md` opens with a task-to-command table and one table of shared flags, and every command has an
+  exit-code table. Dated measurements and investigation history moved to `docs/measurements.md`, and
+  investigation notes to `docs/notes/`. Every page explains its terms at first use and states the rule before
+  the reason. Old section links keep working through "Moved sections" pointers.
+- **The documentation covers what the engine does today.** The second pass of the docs audit filled about 90
+  gaps: the host guide gains Picture in Picture on both routes, scrub previews, track choice at load, the
+  live replay and resume-clamp contracts, faked-range detection, single-connection providers, log redaction,
+  and the opt-in stages (upscaling, subtitle offset reach, loudness target). `docs/api.md` documents the
+  engine-lifetime subjects, `stop(finalTeardown:)`, reload side effects and the live telemetry fields;
+  `docs/formats.md` adds remote HLS routing, AV1 High / Professional, broadcast HLG, the H.264 Dolby Vision
+  record, 2:3 pulldown and the audio shapes the build cannot decode; `docs/architecture.md` describes the
+  route variants, object audio, Now Playing routes, source connections and shared outputs, and its Source
+  map now names every Swift file. `Scripts/check-source-map.py` (CI) keeps it that way.
+
+### Fixed
+
+- **An item that dies after its first frame but before it starts playing is revived instead of parking forever (#1043).**
+  When the HDMI link dropped while the host was still waiting for the display mode switch, AVPlayer's
+  `failedToPlayToEndTime` arrived before the first `.playing`. The #93 revive only counted deaths after that
+  first `.playing`, so nothing reloaded the item and no error surfaced. It now counts from the first frame,
+  and the item is reloaded through the stage-2 recovery like any later death.
+- **An HLS VOD playlist behind a URL that does not say so failed on the AE#154 reroute.** The engine reads
+  `#EXTM3U` and moves the load onto the AVPlayer bypass, but AVFoundation types a URL by its path extension and
+  `Content-Type`, never by its body, so a playlist at `/movie.mp4` served as `video/mp4` or
+  `application/octet-stream` (an IPTV panel's VOD link, typically) failed within a third of a second with
+  AVFoundation -11829 / -11828. The rerouted asset now declares `application/vnd.apple.mpegurl`
+  (`AVURLAssetOverrideMIMETypeKey`), and every rebuild of that session keeps it. Only the reroute declares it,
+  because only there has the engine read the body; a host-set `nativeRemoteHLS` load is typed by AVFoundation as
+  before.
+- **`aetherctl play --host-calls subsatload` no longer reports itself as unknown.** It worked but printed
+  `HOSTCALL unknown 'subsatload'`; the unused `ratehold-tail` call is gone.
+- **A correction can no longer flip `sharedOutputRole` on a running session.** The field was on the list of
+  options that name a session, but `reloadAtCurrentPosition(applying:)` never compared it, so a changed role was
+  applied instead of refused. It is now refused with `loadIdentityNotCorrectable` like the other identity
+  fields, and a test keeps the list and the check from drifting apart again.
+- **`aetherctl elframe`, `elsurvey` and `felcurves` say which trait they need.** Built without it, they fell
+  through to the bare-URL `serve` alias and tried to serve a file named after the command. They now exit 64
+  with the same message `feltest` and `dmpass` give. `Probes/AllTraits` now builds `DolbyVisionFelCurves` too,
+  so the curve fold is compiled for the device SDKs as well.
+- **The documentation matches the code again.** An audit against the source corrected about 80 wrong or stale
+  statements across the README, `docs/` and the Swift doc comments. The biggest: codecs outside the native and
+  software lists route to software instead of failing the load, AV1 plays natively where the chip decodes it,
+  GPU deinterlacing is the default, `IOReader.discImageProbeEnabled` defaults to true, plain
+  `reloadAtCurrentPosition()` throws on a custom source, rendered object audio leaves as linear PCM (APAC only
+  over AirPlay), the display switch waits up to 2 s, and the README and guide quick starts compile.
+- **A Mac with more than 16 cores decoded software video on more threads than libavcodec recommends (#1042, thanks @yucelokan).**
+  The decoder opened with one thread per core, and under frame threading every thread past the first
+  holds a decoded frame until more packets arrive: 17 frames on an 18-core Mac (Mac17,6), where a
+  40-packet progressive H.264 delivered 23 frames and a Live source whose reads stalled kept 17
+  received frames off the screen. Playback now decodes on at most 16 threads, where libavcodec's own
+  automatic choice stops and above which it warns, so such a Mac holds at most 15, as a 16-core one
+  already did. Apple TV, iPhone and iPad have fewer cores and are unchanged.
 
 ## [7.64.0] - 2026-11-12
 

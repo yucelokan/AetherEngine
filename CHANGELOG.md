@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **`SourceNetworkDiagnostics.Event` now says why a source refused a request.** A 401, 403 or 407
+  was reported with its status only, so a proxy that wants credentials looked the same as an origin
+  that refuses an account. The event now carries `authChallenge`, `authChallengeHeader` (`www` or
+  `proxy`), `authScheme` (first token only, never the realm), `retryAfterSeconds` (delta-seconds,
+  capped at one hour) and, on `.metrics` events, `proxyConnection`. Logging only, no change in
+  playback. The HLS VOD persistent transport does not set them yet.
+
 ### Tests and CI
 
 - **The APAC encode pipeline test no longer expects Apple's encoder to give the same bytes on two threads.**

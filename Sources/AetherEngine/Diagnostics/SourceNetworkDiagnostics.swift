@@ -1,7 +1,9 @@
 import Foundation
 
 /// Observes real source requests. Hosts must redact URLs before persistence;
-/// no headers, response bodies or localized error messages are included.
+/// no header values, response bodies or localized error messages are included.
+/// The only header facts are fixed tokens: whether a refusal carried an auth challenge, which
+/// header it came on, the scheme token it names and the bounded `Retry-After` seconds.
 public enum SourceNetworkDiagnostics {
     /// Host-owned opaque identifiers. They are never sent as HTTP headers.
     public struct Context: Sendable, Equatable {
@@ -61,6 +63,70 @@ public enum SourceNetworkDiagnostics {
         public static let abandoned = Phase(rawValue: "abandoned")
     }
 
+    /// Whether a 401, 403 or 407 refusal carried an auth challenge header.
+    public enum AuthChallenge: String, Sendable, Equatable {
+        case none
+        case present
+    }
+
+    /// The header a refusal's auth challenge came on.
+    public enum AuthChallengeHeader: String, Sendable, Equatable {
+        /// `WWW-Authenticate`: the origin asks for credentials.
+        case www
+        /// `Proxy-Authenticate`: a proxy on the path asks for credentials.
+        case proxy
+    }
+
+    /// The scheme token of an auth challenge, never its realm, nonce or other parameters.
+    public enum AuthScheme: String, Sendable, Equatable {
+        case basic, digest, bearer, negotiate, ntlm, other
+    }
+
+    /// Longest `Retry-After` an event reports, in seconds.
+    static let maximumReportedRetryAfterSeconds = 3_600
+
+    /// Header facts of one response. Challenge fields are set only for 401, 403 and 407.
+    struct ResponseFacts: Equatable {
+        var authChallenge: AuthChallenge?
+        var authChallengeHeader: AuthChallengeHeader?
+        var authScheme: AuthScheme?
+        var retryAfterSeconds: Int?
+
+        init(_ response: HTTPURLResponse?) {
+            guard let response else { return }
+            retryAfterSeconds = Self.retryAfterSeconds(response.value(forHTTPHeaderField: "Retry-After"))
+            guard [401, 403, 407].contains(response.statusCode) else { return }
+            // The header that matches the status comes first; a refusal that carries only the other one
+            // still reports it, because that is what the origin or proxy sent.
+            let order: [(AuthChallengeHeader, String)] = response.statusCode == 407
+                ? [(.proxy, "Proxy-Authenticate"), (.www, "WWW-Authenticate")]
+                : [(.www, "WWW-Authenticate"), (.proxy, "Proxy-Authenticate")]
+            for (header, field) in order {
+                guard let value = response.value(forHTTPHeaderField: field) else { continue }
+                authChallenge = .present
+                authChallengeHeader = header
+                authScheme = Self.scheme(value)
+                return
+            }
+            authChallenge = AuthChallenge.none
+        }
+
+        /// First token only; everything after it (realm, nonce, further challenges) is dropped.
+        static func scheme(_ value: String) -> AuthScheme {
+            let token = value.drop { $0 == " " || $0 == "\t" }
+                .prefix { $0 != " " && $0 != "\t" && $0 != "," }
+            return AuthScheme(rawValue: token.lowercased()) ?? .other
+        }
+
+        /// Delta-seconds only, like the playlist path; an HTTP date, a negative or a non-finite value
+        /// is dropped, and a long wait is capped.
+        static func retryAfterSeconds(_ value: String?) -> Int? {
+            guard let value, let seconds = TimeInterval(value.trimmingCharacters(in: .whitespaces)),
+                  seconds.isFinite, seconds >= 0 else { return nil }
+            return Int(min(seconds, TimeInterval(maximumReportedRetryAfterSeconds)))
+        }
+    }
+
     /// Immutable snapshot of one request event.
     public struct Event: Sendable {
         public let requestID: UUID
@@ -77,13 +143,25 @@ public enum SourceNetworkDiagnostics {
         public let tlsMilliseconds: Int?
         public let responseMilliseconds: Int?
         public let reusedConnection: Bool?
+        /// Whether a 401, 403 or 407 carried an auth challenge; nil for other statuses and for events
+        /// that saw no HTTP response.
+        public let authChallenge: AuthChallenge?
+        /// The header that carried the challenge; nil unless `authChallenge` is `.present`.
+        public let authChallengeHeader: AuthChallengeHeader?
+        /// The challenge's scheme token; nil unless `authChallenge` is `.present`.
+        public let authScheme: AuthScheme?
+        /// The response's `Retry-After` in whole seconds (delta-seconds form, at most one hour).
+        public let retryAfterSeconds: Int?
+        /// Whether the transaction ran through a proxy. Set on `.metrics` events only.
+        public let proxyConnection: Bool?
         public let context: Context?
 
         init(requestID: UUID, role: Role, phase: Phase, originalURL: URL?, url: URL?,
              status: Int?, urlErrorCode: Int?, bytes: Int64, elapsedMilliseconds: Int,
              dnsMilliseconds: Int? = nil, connectMilliseconds: Int? = nil,
              tlsMilliseconds: Int? = nil, responseMilliseconds: Int? = nil,
-             reusedConnection: Bool? = nil, context: Context? = nil) {
+             reusedConnection: Bool? = nil, facts: ResponseFacts = ResponseFacts(nil),
+             proxyConnection: Bool? = nil, context: Context? = nil) {
             self.requestID = requestID
             self.role = role
             self.phase = phase
@@ -98,6 +176,11 @@ public enum SourceNetworkDiagnostics {
             self.tlsMilliseconds = tlsMilliseconds
             self.responseMilliseconds = responseMilliseconds
             self.reusedConnection = reusedConnection
+            self.authChallenge = facts.authChallenge
+            self.authChallengeHeader = facts.authChallengeHeader
+            self.authScheme = facts.authScheme
+            self.retryAfterSeconds = facts.retryAfterSeconds
+            self.proxyConnection = proxyConnection
             self.context = context
         }
     }
@@ -139,7 +222,7 @@ public enum SourceNetworkDiagnostics {
         }
 
         private func event(_ phase: Phase, task: URLSessionTask, url: URL? = nil,
-                           status: Int? = nil, error: Error? = nil,
+                           status: Int? = nil, error: Error? = nil, response: URLResponse?,
                            transaction: URLSessionTaskTransactionMetrics? = nil) -> Event {
             func milliseconds(_ start: Date?, _ end: Date?) -> Int? {
                 guard let start, let end else { return nil }
@@ -155,23 +238,27 @@ public enum SourceNetworkDiagnostics {
                   tlsMilliseconds: milliseconds(transaction?.secureConnectionStartDate, transaction?.secureConnectionEndDate),
                   responseMilliseconds: milliseconds(transaction?.requestStartDate, transaction?.responseStartDate),
                   reusedConnection: transaction?.isReusedConnection,
+                  facts: ResponseFacts(response as? HTTPURLResponse),
+                  proxyConnection: transaction?.isProxyConnection,
                   context: context)
         }
         func response(task: URLSessionTask, response: URLResponse) {
-            handler?(event(.response, task: task, url: response.url, status: (response as? HTTPURLResponse)?.statusCode))
+            handler?(event(.response, task: task, url: response.url,
+                           status: (response as? HTTPURLResponse)?.statusCode, response: response))
         }
         func redirect(task: URLSessionTask, response: HTTPURLResponse, request: URLRequest) {
-            handler?(event(.redirect, task: task, url: request.url, status: response.statusCode))
+            handler?(event(.redirect, task: task, url: request.url, status: response.statusCode,
+                           response: response))
         }
         func completed(task: URLSessionTask, error: Error?, phase: Phase = .completed) {
-            handler?(event(phase, task: task, error: error))
+            handler?(event(phase, task: task, error: error, response: task.response))
         }
         func metrics(task: URLSessionTask, metrics: URLSessionTaskMetrics) {
             guard let receive = handler else { return }
             for transaction in metrics.transactionMetrics {
                 receive(event(.metrics, task: task, url: transaction.request.url,
                               status: (transaction.response as? HTTPURLResponse)?.statusCode,
-                              transaction: transaction))
+                              response: transaction.response, transaction: transaction))
             }
         }
     }

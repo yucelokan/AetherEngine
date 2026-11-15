@@ -2140,7 +2140,7 @@ A failed live start keeps `PlaybackErrorKind.liveSourceUnavailable`, with its or
 - Events from players running at the same time can interleave. Filter by captured context or request identity, not by arrival order.
 - Installing a handler does not change request or TLS policy.
 
-**Event shape.** `SourceNetworkDiagnostics.Event` carries a per-request `requestID`, `role`, `phase`, status/URL error code, byte and timing metrics, and an optional `context`. All event fields are immutable. `SourceNetworkDiagnostics.Role` and `SourceNetworkDiagnostics.Phase` are string-backed structs with stable `rawValue` tokens, and `init(rawValue:)` for future values. Hosts should handle unknown values.
+**Event shape.** `SourceNetworkDiagnostics.Event` carries a per-request `requestID`, `role`, `phase`, status/URL error code, byte and timing metrics, the refusal facts below, and an optional `context`. All event fields are immutable. `SourceNetworkDiagnostics.Role` and `SourceNetworkDiagnostics.Phase` are string-backed structs with stable `rawValue` tokens, and `init(rawValue:)` for future values. Hosts should handle unknown values.
 
 | Roles (raw value) | Phases (raw value) |
 | --- | --- |
@@ -2154,7 +2154,19 @@ A failed live start keeps `PlaybackErrorKind.liveSourceUnavailable`, with its or
 | `hlsKey` (`HLSKey`) | |
 | `boundedBody` (`BoundedBody`) | |
 
-**Privacy.** Events contain no response bodies, header values or localized errors. Their `originalURL` and `url` are raw source URLs, for matching on the host side. The host must redact them before storing or forwarding them, and chooses its own logging and retention policy.
+**Refusal facts.** These say why a source refused a request, so a host can tell a proxy that wants credentials from an origin that does. They are set from the task's `HTTPURLResponse` (the transaction's own response on `.metrics` events) and change no behaviour.
+
+| Field | Values | Set when |
+| --- | --- | --- |
+| `authChallenge` (`AuthChallenge`) | `none`, `present` | The status is 401, 403 or 407. `present` means the response carried `WWW-Authenticate` or `Proxy-Authenticate`; `nil` for any other status. |
+| `authChallengeHeader` (`AuthChallengeHeader`) | `www`, `proxy` | `authChallenge` is `present`. The header that matches the status wins (`Proxy-Authenticate` for 407, `WWW-Authenticate` for 401 and 403). |
+| `authScheme` (`AuthScheme`) | `basic`, `digest`, `bearer`, `negotiate`, `ntlm`, `other` | `authChallenge` is `present`. Only the first token of the header, lowercased. |
+| `retryAfterSeconds` | whole seconds | The response has a `Retry-After` in delta-seconds form. An HTTP date or a negative value gives `nil`; a long wait is capped at one hour. |
+| `proxyConnection` | `Bool` | `.metrics` events only: `isProxyConnection` of that transaction. `nil` on other phases. |
+
+The persistent HTTP/1.1 transport (HLS VOD ingest) does not set these fields yet.
+
+**Privacy.** Events contain no response bodies, header values or localized errors. The refusal facts above are fixed tokens and a bounded number; a challenge's realm, nonce and other parameters are never kept. Their `originalURL` and `url` are raw source URLs, for matching on the host side. The host must redact them before storing or forwarding them, and chooses its own logging and retention policy.
 
 **Attributing requests to a playback.** Set `LoadOptions.sourceDiagnosticsContext` to a `SourceNetworkDiagnostics.Context(playbackID:attemptID:)` before `load()`.
 

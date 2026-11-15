@@ -10,6 +10,15 @@ the public-API contract.
 
 ## [Unreleased]
 
+### Added
+
+- **Source network events carry the auth challenge, `Retry-After` and proxy facts of a response.** A playback
+  407 was logged with no way to tell a proxy login from an origin refusal. `SourceNetworkDiagnostics.Event`
+  now has `authChallenge` (`absent`, `www` or `proxy`, for a 401, 403 or 407), `authScheme` (the first token
+  only: `basic`, `digest`, `bearer`, `negotiate`, `ntlm` or `other`), `retryAfterSeconds` (bounded like the
+  playlist path) and `proxyConnection` (on `metrics` events). No realm or header value is reported.
+  Logging only; no change in playback.
+
 ### Tests and CI
 
 - **The APAC encode pipeline test no longer expects Apple's encoder to give the same bytes on two threads.**

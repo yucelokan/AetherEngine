@@ -2142,6 +2142,17 @@ A failed live start keeps `PlaybackErrorKind.liveSourceUnavailable`, with its or
 
 **Event shape.** `SourceNetworkDiagnostics.Event` carries a per-request `requestID`, `role`, `phase`, status/URL error code, byte and timing metrics, and an optional `context`. All event fields are immutable. `SourceNetworkDiagnostics.Role` and `SourceNetworkDiagnostics.Phase` are string-backed structs with stable `rawValue` tokens, and `init(rawValue:)` for future values. Hosts should handle unknown values.
 
+**Response facts.** Four optional fields describe the response, never its text:
+
+| Field | Set when | Value |
+| --- | --- | --- |
+| `authChallenge` | the response status is 401, 403 or 407 | `AuthChallenge`: `absent`, `www` (`WWW-Authenticate`) or `proxy` (`Proxy-Authenticate`). The header that belongs to the status wins when both are present. |
+| `authScheme` | `authChallenge` is `www` or `proxy` | `AuthScheme`: the first token of the header, lowercased: `basic`, `digest`, `bearer`, `negotiate`, `ntlm`, or `other`. Never a realm or any other value. |
+| `retryAfterSeconds` | the response has a `Retry-After` in seconds | Seconds, from 0 to 5, the longest the engine itself waits on a refused playlist. An HTTP-date is nil. |
+| `proxyConnection` | `metrics` events | `isProxyConnection` of the transaction. |
+
+`AuthChallenge` and `AuthScheme` are string-backed structs like `Role` and `Phase`: keep the raw value and handle unknown ones. The challenge fields come from `response`, `redirect` and `completed` events and from `metrics` events whose transaction has a response; they are nil for a status that is not 401, 403 or 407.
+
 | Roles (raw value) | Phases (raw value) |
 | --- | --- |
 | `persistentRead` (`PersistentRead`) | `response` |
@@ -2154,7 +2165,7 @@ A failed live start keeps `PlaybackErrorKind.liveSourceUnavailable`, with its or
 | `hlsKey` (`HLSKey`) | |
 | `boundedBody` (`BoundedBody`) | |
 
-**Privacy.** Events contain no response bodies, header values or localized errors. Their `originalURL` and `url` are raw source URLs, for matching on the host side. The host must redact them before storing or forwarding them, and chooses its own logging and retention policy.
+**Privacy.** Events contain no response bodies, header values (only the challenge kind, its scheme token and a bounded `Retry-After`) or localized errors. Their `originalURL` and `url` are raw source URLs, for matching on the host side. The host must redact them before storing or forwarding them, and chooses its own logging and retention policy.
 
 **Attributing requests to a playback.** Set `LoadOptions.sourceDiagnosticsContext` to a `SourceNetworkDiagnostics.Context(playbackID:attemptID:)` before `load()`.
 

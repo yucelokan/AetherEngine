@@ -273,7 +273,7 @@ Notes:
 | `SubtitleDeliveryStatement.swift` | Value and formatter for the #357 line. See note. |
 | `LogRedaction.swift` | Strips credentials (tokens in URL queries, auth headers) out of a line before `EngineLog` emits it. |
 | `FFmpegRuntimeCheck.swift` | Witnesses which FFmpeg answers in this process, so a second FFmpeg in the host's link is caught. |
-| `SourceNetworkDiagnostics.swift` | Public observer of real source requests, tagged with a playback and attempt id. No headers or bodies. |
+| `SourceNetworkDiagnostics.swift` | Public observer of real source requests, tagged with a playback and attempt id. No header values or bodies. |
 | `PlayedMediaLedger.swift` | AE#514: media bytes keyed by presentation time, so bitrate is metered from what the playhead crossed, not what was transferred. |
 | `VideoFrameProgress.swift` | Whether the video presentation is actually advancing, judged apart from a progressing audio or item clock. |
 | `QoSClassName.swift` | One name for a QoS class, read back after setting it, for the self-retuning producers' logs (AE#286, AE#519). |

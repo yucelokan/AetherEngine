@@ -94,16 +94,16 @@ The engine picks at load (`load(url:)` / `load(source:)`), in this order:
 1. **Audio-only**, when `LoadOptions.audioOnly` is set.
 2. Otherwise **by the video codec** (`VideoRoutingPolicy`).
    - The native side is an allowlist of what AVPlayer's HLS-fMP4 pipeline reliably accepts: HEVC, progressive H.264 and, on devices with a hardware AV1 decoder, AV1.
-   - Everything else goes to the software host: AV1 without hardware decode, VP9, VP8, MPEG-4 Part 2, MPEG-2, VC-1, interlaced H.264 (for deinterlacing), profiles VideoToolbox cannot decode, and every other codec.
+   - Everything else goes to the software host: AV1 without hardware decode, VP9, VP8, MPEG-4 Part 2, MPEG-2, VC-1, interlaced H.264 (for deinterlacing, except while an AirPlay receiver that shows video holds the route, AE#1070), profiles VideoToolbox cannot decode, and every other codec.
    - The full per-codec table, with the reason for each row, is in [formats.md, Software decode](formats.md#software-decode) and [Hardware decode](formats.md#hardware-decode).
 3. **How the source reaches AVPlayer.** Remote HLS can go to AVPlayer directly. HLS the engine reads itself feeds the loopback. MPEG-DASH becomes a virtual MP4 file. See [Native route variants](architecture-native.md#native-route-variants).
-4. **Optional stages**, all opt-in: low-resolution upscaling and Dolby Vision FEL composition (both can move a session onto the software path), the FEL curve fold, rendered object audio, the I-frame rendition and live recording. See [Optional video stages](architecture-software.md#optional-video-stages), [Audio routes and object audio](architecture-native.md#audio-routes-and-object-audio), [Trick play and scrub stills](architecture-native.md#trick-play-and-scrub-stills) and [Live recording](architecture-native.md#live-recording).
+4. **Optional stages**, all opt-in: low-resolution upscaling, picture processing (the HDR10 tone map) and Dolby Vision FEL composition (all three can move a session onto the software path), the FEL curve fold, rendered object audio, the I-frame rendition and live recording. See [Optional video stages](architecture-software.md#optional-video-stages), [Audio routes and object audio](architecture-native.md#audio-routes-and-object-audio), [Trick play and scrub stills](architecture-native.md#trick-play-and-scrub-stills) and [Live recording](architecture-native.md#live-recording).
 
 A few recoveries move a running session to another pipeline:
 
 - **Software escalation** (`SoftwarePathEscalation`): CoreMedia refuses the media mid-session, so the engine rebuilds the session on the software host.
 - **Remote HLS carriage fallback** (`RemoteHLSIngestFallback`): AVPlayer cannot play a remote HLS stream directly, so the engine reads it itself and serves it through the loopback.
-- **Return from the upscale route**: the upscaler gives up and the session goes back to native.
+- **Return from the upscale or picture processing route**: the stage gives up and the session goes back to native.
 
 `videoRoute` always reports the route actually running. The transitions are listed under [Effective video route](#effective-video-route-videoroute).
 
@@ -119,7 +119,9 @@ These cases take the libavcodec route even when the codec is on the whitelist:
 | Case | Reason |
 | --- | --- |
 | A custom `IOReader` | AVPlayer needs a URL. |
+| A container AVFoundation does not open (Matroska, Ogg, MPEG-TS, ASF, ...) | AVPlayer answers "Cannot Open" and the clock stays at 0. Only QuickTime/MP4/M4A, raw MP3/MP2, ADTS AAC, raw AC-3 / E-AC-3, raw FLAC, WAV, AIFF and CAF go to AVPlayer (`avPlayerReadsAudioContainer`). |
 | A FLAC whose blocks are under CoreMedia's floor | AE#764. |
+| An AAC whose layout sits in a PCE (`channelConfiguration` 0) | AVPlayer opens it and ends at 0 s with no duration (AE#1047). |
 | A FLAC whose first frame is smaller than its `STREAMINFO` `max_blocksize` | AVPlayer times each frame by the declared size and runs its clock past the end. Read from a peeked first packet (AE#946). |
 | Any FLAC in the raw `flac` container | CoreMedia ignores the `SEEKTABLE`, places a seek by an estimated byte rate, and stamps the requested time on the frame it reached, seconds early on real music (AE#946). FLAC in MP4 seeks exactly. |
 | `LoadOptions.preferredDecodePath = .software` | The host app asked for it. |
@@ -128,7 +130,7 @@ These cases take the libavcodec route even when the codec is on the whitelist:
 
 ```
 audioOnly == true
-   ├─ whitelisted codec, URL source, not .software ──► AVPlayer (AudioAVPlayerHost) ──► AVR / speakers
+   ├─ whitelisted codec and container, URL source, not .software ──► AVPlayer (AudioAVPlayerHost) ──► AVR / speakers
    └─ otherwise ──► Demuxer ──► AudioDecoder ──► AVSampleBufferAudioRenderer ──► AVR / speakers
 ```
 

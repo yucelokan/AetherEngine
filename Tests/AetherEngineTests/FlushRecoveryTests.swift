@@ -390,6 +390,22 @@ private final class PacketRecordingDecoder: VideoDecodingPipeline, @unchecked Se
     func close() {}
 }
 
+/// A decoder whose session rebuild always succeeds, for the AE#739 recovery path.
+private final class RebuildableDecoder: VideoDecodingPipeline, VideoSessionRebuilding, @unchecked Sendable {
+    var onFrame: DecodedFrameHandler?
+    var onFirstHDR10PlusDetected: (@Sendable () -> Void)?
+    var onA53Captions: (@Sendable ([CCDataParser.CCTriplet], Double) -> Void)?
+    var onDecodedFormat: (@Sendable (DecodedVideoFormat) -> Void)?
+    var onSessionLost: (@Sendable () -> Void)?
+    var skipUntilPTS: CMTime?
+    var feedEpoch: UInt64 { 0 }
+    func open(stream: UnsafeMutablePointer<AVStream>, onFrame: @escaping DecodedFrameHandler) throws {}
+    func decode(packet: UnsafeMutablePointer<AVPacket>, epoch: UInt64?) {}
+    func flush() {}
+    func close() {}
+    func rebuildSession() -> Bool { true }
+}
+
 /// A reader over in-memory data that blocks, once armed, any read from `blockFrom` bytes on until it is
 /// released, so a session cannot reach the end of media while a test looks at the state it is in before
 /// it. Before it is armed, or short of `blockFrom`, it behaves as `DataIOReader` does.
@@ -497,7 +513,7 @@ private func syntheticVideoFixture(keyFlags: [Bool], withAudio: Bool = false) th
     return Data(bytes: try #require(bytes), count: Int(count))
 }
 
-@Suite("Flush recovery host", .serialized, .timeLimit(.minutes(2)))
+@Suite("Flush recovery host", .serialized, .timeLimit(.minutes(3)))
 @MainActor
 struct FlushRecoveryHostTests {
 
@@ -588,6 +604,23 @@ struct FlushRecoveryHostTests {
         // The floor restarts at the playhead, not at whatever frame arrives first.
         #expect(decoder.skipUntilPTS.map { abs($0.seconds - 20) < 0.01 } == true)
         #expect(host.flushRecoveryLog.map(\.action) == [.flushVideoOnly])
+    }
+
+    /// NAT-202: the AE#739 session rebuild used to seek to the published `currentTime`, which the
+    /// 0.25 s timer writes, so up to a tick of audio played twice on every recovery.
+    @Test("a rebuilt video session repositions to the clock, not to the stale published time")
+    func sessionRebuildRepositionsToTheClock() async throws {
+        let targets = Targets()
+        let host = try await loadedHost(targets)
+        defer { host.stop() }
+        host.setVideoDecoderForTesting(RebuildableDecoder())
+        host.seekClockForTesting(to: 20)
+        #expect(host.currentTime < 19, "the published time must still be stale for the test to mean anything")
+        host.setVideoSessionRecoveryOwedForTesting()
+        host.exitBackgroundAudioOnly()
+        try await waitFor { !targets.values.isEmpty }
+        let target = try #require(targets.values.first)
+        #expect(abs(target - 20) < 0.01, "got \(target)")
     }
 
     @Test("a keyframe beyond the audio lead: the session goes back to the playhead")
@@ -930,14 +963,22 @@ struct FlushRecoveryHostTests {
     @Test("video dropped in the background takes the parked keyframes with it, so the owed recovery sees the hole")
     func backgroundDropFreesLedger() async throws {
         // A long clip, read through a source that stops answering half way: the end of media also frees what
-        // is parked, and would pass this test with the background drop taken out. Its only keyframe is the
-        // first: the read-ahead still holds packets read before the source stopped, and the foreground
-        // return clears the background flag before it judges the debt, so a keyframe among them could be
-        // parked in between and read as one at hand (a CI run saw `.flushVideoOnly`).
+        // is parked, and would pass this test with the background drop taken out. The planted keyframe must
+        // be the only one: the foreground return clears the background flag before it judges the debt, so a
+        // keyframe the loop parks in between reads as one at hand (`.flushVideoOnly`). The waits below do not
+        // prove the loop got past packet 0: it frees the parked queue at the top of every background turn,
+        // and the read-ahead reaches the gate on its own. On a loaded CI runner (run 43366418813) packet 0
+        // was still unread at the return. The test reads it off the demuxer itself, because an unflagged
+        // first sample is still a keyframe (the MP4 demuxer makes it a sync sample).
         let data = try syntheticVideoFixture(keyFlags: (0..<8000).map { $0 == 0 }, withAudio: true)
         let reader = GatedIOReader(data: data, blockFrom: data.count / 2)
         let dem = Demuxer()
         try dem.open(reader: reader, formatHint: "mp4")
+        while true {
+            var packet: UnsafeMutablePointer<AVPacket>? = try #require(try dem.readPacket())
+            defer { trackedPacketFree(&packet) }
+            if packet?.pointee.stream_index == dem.videoStreamIndex { break }
+        }
         reader.arm()
         let host = SoftwarePlaybackHost(reposition: { _, _, _, _, _ in .landed })
         defer { reader.release(); host.stop() }

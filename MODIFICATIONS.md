@@ -1,22 +1,32 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-13. Integration base: upstream 7.65.0
-(`260af699baf5b2c3baa2015bcf80231bb3cf77e3`).
+Updated: 2026-11-18. Integration base: upstream 7.70.0
+(`3cfe848106482150209281c176ed72df5ac2674c`).
 
 ## Current differences
 
-One change, a test change not offered upstream yet. Otherwise the source matches 7.65.0 exactly,
-and this file and `COPYING.GPL3` are the only other additions. Fixes made here are generic and go
-upstream as pull requests.
+One change, not offered upstream yet. Otherwise the source matches 7.70.0 exactly, and this file and
+`COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as pull
+requests.
 
-- The APAC encode pipeline test's reference (2026-11-12): `APACEncodePipelineTests` no longer
-  compares the pipeline with a second APAC encode on the test thread, because Apple's APAC encoder
-  is not byte-reproducible across threads (macOS 27.0.1 gives one of two streams, 851,362 or
-  851,540 bytes, for the same 40 chunks of 7.1.4). It wraps the real encoder through an internal
-  `APACPacketEncoding` protocol and checks byte for byte the chunks the encoder receives and the
-  packets it returns. No change in playback. Upstream: not offered yet; it goes upstream once a
-  suite run has passed it. Files: `Sources/AetherEngine/Audio/Spatial/APACEncodePipeline.swift`,
-  `Tests/AetherEngineTests/APACEncodePipelineTests.swift`, `CHANGELOG.md`.
+- Auth challenge, `Retry-After` and proxy facts on source network events (2026-11-17):
+  `SourceNetworkDiagnostics.Event` gains `authChallenge` (`absent`, `www` or `proxy`, for a 401, 403
+  or 407), `authScheme` (first token only, a fixed set), `retryAfterSeconds` and `proxyConnection`
+  (on `metrics` events). No realm or header value is reported. Logging only; no change in playback.
+  Upstream: not offered yet; it goes upstream once a suite run has passed it. Commit `05f0e686`.
+  Files: `Sources/AetherEngine/Diagnostics/SourceNetworkDiagnostics.swift`,
+  `Tests/AetherEngineTests/SourceNetworkDiagnosticsAuthFactsTests.swift`,
+  `Tests/AetherEngineTests/Issue255BodyReserveTests.swift`, `docs/api.md`, `docs/source-map.md`,
+  `CHANGELOG.md`.
+
+Not taken in this integration: the one-line change to `.github/workflows/used-by-add.yml` (an
+upstream-only automation). The fork's push token has no `workflow` scope, so GitHub refuses a push that
+changes a workflow file; the fork keeps its copy of that file. Take it with the next integration once the
+token allows it.
+
+Dropped in this integration: the fork's APAC encode pipeline test change (2026-11-12). Upstream fixed
+the same flake itself in 7.66 to 7.70 (`6a8e7da2`, #1063: the two encodes are compared by decoded
+audio), so the integration takes upstream's pipeline and test and the fork's seam is gone.
 
 Released upstream in 7.65.0: the software decoder's playback thread cap, which the fork carried from
 2026-11-12 (`SoftwareVideoDecoder` decodes on at most 16 threads):
@@ -86,7 +96,7 @@ The earlier dated records, individual changes and validation limits remain in Gi
 
 The original contribution series was based on 7.23.2. Subsequent updates integrated
 published upstream releases; #748 was incorporated before the 7.37.0 release
-and is included in the current 7.65.0 integration.
+and is included in the current 7.70.0 integration.
 
 The engine retains its original copyright notices and the LGPL v3 and Apple Store / DRM
 Exception in [LICENSE](LICENSE). The incorporated GPL text is in [COPYING.GPL3](COPYING.GPL3).

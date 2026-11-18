@@ -371,6 +371,127 @@ Current rule: [architecture-software.md › VideoToolbox output metadata](archit
 
 The check: 240 frames of two real FEL clips were bit-identical with and without the copy. A long-GOP picture comparison on the Apple TV decoder is still open.
 
+### HDR10 metadata on the software path reaches the television (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2) into an LG OLED77G4 on 2026-11-13: mastering display and content light level attached to the buffers given to `AVSampleBufferDisplayLayer` reach the television, on VideoToolbox's buffers and on buffers the engine rendered itself.
+
+Current rule: [architecture-software.md › VideoToolbox output metadata](architecture-software.md#videotoolbox-output-metadata).
+
+The check: the metadata on an unchanged picture switched every 3 s between a 1000 and a 4000 nit set. Filmed with the exposure locked, the ratio of the 4000 to the 1500 nit patch followed each switch about 2 s later, as it does when AVPlayer switches between a 1000 and a 4000 nit clip. Numbers and method: [`Probes/HDR10PassThrough`](../Probes/HDR10PassThrough/README.md), with the probe described in [architecture-software.md › HDR10 pass-through probe](architecture-software.md#hdr10-pass-through-probe). Also found: VideoToolbox attaches no HDR10 metadata to the frames it decodes, so the software path sent none.
+
+### Per-frame cost of the software path (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2) on 2026-11-13 with `AetherEngine.runPerFrameBenchmarks`, 4K P010, 300 runs per case.
+
+Current rule: [architecture-software.md › VideoToolbox output metadata](architecture-software.md#videotoolbox-output-metadata).
+
+| Case | Median (us) | p99 (us) |
+|---|---|---|
+| Normalizer, frame already tagged | 30 | 32 |
+| Normalizer, tag in place | 18 | 30 |
+| Normalizer, owned copy | 7193 | 7778 |
+| Renderer, sample buffer | 25 | 41 |
+| Frame chain, one pass-through stage, two passes through RGB | 11647 (GPU 10087) | 11908 |
+| HDR10 SEI scan, 250 KB key frame | 12 | 13 |
+
+**The owned copy is the cost that matters.** A frame lasts 41708 us at 23.976 fps and 16683 us at 59.94. Before the fix below, an HDR10 HEVC clip on the software path took the copy on every frame (489 of 489).
+
+**Why it copied.** VideoToolbox tagged its output BT.709 (`ColorInfoGuessedBy`) for a PQ BT.2020 HEVC clip whose VUI said otherwise, and carried no HDR10 static metadata. Both mismatched what the normalizer attaches, and the output buffers are not modifiable.
+
+**The fix.** The format description VideoToolbox decodes with now carries the stream's colour (as AV1 and VP9 already did) and its HDR10 values when they are known at open. VideoToolbox then attaches both to its own output: 486 of 486 frames matched as decoded, none copied.
+
+**The frame chain's RGB texture.** The two passes write a 66 MB half-float RGB texture per 4K frame and read it back. A chain of pass-through stages now runs as one kernel without it. A separate run on the same device and day, so the two-pass row differs a little from the table above:
+
+| Chain, 4K P010 | Wall median (us) | GPU median (us) |
+|---|---|---|
+| Two passes through RGB | 11426 | 9871 |
+| One kernel | 5341 | 3987 |
+| One kernel, wide texels, folded arithmetic | 3973 | 2675 |
+
+Luma is identical between all three, and chroma is within one code value.
+
+**What set the one kernel's time on the A12.** Variants of it, same frame and day (GPU median, us):
+
+| Variant | GPU |
+|---|---|
+| Copy only, one sample per access | 3456 |
+| Copy only, four luma samples per access | 1936 |
+| Four per access, chroma sampler but no arithmetic | 1956 |
+| Four per access, full arithmetic | 3970 |
+| The same, coefficients folded per thread | 2583 |
+| The same, chroma read by hand (9 texels) instead of sampled | 4587 |
+
+So the sampler is free, wide accesses halve the memory cost, and the arithmetic set the rest. Half precision arithmetic took 2606 but moved luma by up to 2 codes, so it is not used.
+
+**The time outside the GPU** (about 1.3 ms) is mostly the CPU slowing down while it waits for the command buffer. Spinning on the status instead of `waitUntilCompleted` cut the wall time by 0.8 ms, but holds a core busy for the whole GPU time, so the chain still waits.
+
+### Tone map at 4K60 on the A12 (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2) on 2026-11-14. The answer first: **the BT.2390 tone map fits 4K at 60 fps on the A12, inside the one round-trip kernel.** No frame-rate gate is needed for a chain of the tone map alone. As its own pass between the two passes through RGB it does not fit.
+
+Current rule: [architecture-software.md › HDR10 tone map](architecture-software.md#hdr10-tone-map).
+
+**Benchmark.** `AetherEngine.runPerFrameBenchmarks`, 4K P010, 300 runs per case, a 1000 nit master to a 600 nit target:
+
+| Chain, 4K P010 | Wall median (us) | GPU median (us) |
+|---|---|---|
+| Pass-through, one kernel | 3950 | 2674 |
+| Tone map, one kernel | 5297 | 3976 |
+| Tone map, two passes | 16869 | 15209 |
+
+- A 60 fps frame lasts 16683 us, so the one-kernel tone map takes about a third of it.
+- The first version wrote the spline out term by term: 8531 wall, 7150 GPU. As one cubic per component (coefficients worked out once on the CPU) it is the 5297 / 3976 above, with the same output to within a quarter of a 10-bit code. The arithmetic sets the time on the A12, as for the round trip.
+- The two-pass tone map costs what the extra trip through the RGB texture costs, not the curve.
+
+**Playback.** The Jellyfin test clip "4K HEVC HDR10 40M" (3840x2160, HEVC Main 10, PQ BT.2020, 60 fps, 30 s), on the software path through the HDR10 probe. The clip carries no HDR10 metadata, so the probe's values stood in (`maxcll=1000,maxfall=400,peak=1000`), mapped to 600 nit. Each run played 28.9 s.
+
+| Run | Dropped frames | Chain GPU per frame, mean of 48-frame windows | Worst frame |
+|---|---|---|---|
+| Software path, no chain | 1 | - | - |
+| Chain, pass-through | 1 | 4.16 ms | 8.71 ms |
+| Tone map, six runs in a row (173 s) | 0 in every run | 4.95 to 5.04 ms | 13.68 ms |
+
+- The first ten windows of each run are logged (480 frames). The six tone-map runs show no drift, so the A12 did not slow down as it warmed.
+- The output frames and the format description carried the stage's metadata: mastering peak 600, MaxCLL / MaxFALL 600 / 400.
+- In playback the chain's GPU time is about 1.5 ms above the benchmark's, with the decoder and the display on the same GPU.
+
+### Upscale stage on the A12 (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2.1) on 2026-11-15 with `AetherEngine.runPerFrameBenchmarks`, 300 runs per case, each to a 3840x2160 display. The answer first: **on the A12 only MetalFX alone and the line-art upscale rung fit a 23.976 fps frame, and nothing fits 59.94.** VT super resolution does not run there at all.
+
+| Case | Plan | Wall median (us) | GPU median (us) |
+|---|---|---|---|
+| `upscale: 720p to 2160p, MetalFX only` | 1280x720 -> MetalFX 3840x2160 | 19593 | 17154 |
+| `upscale: 1080p to 2160p, line art` | 1920x1080 -> line art 3840x2160 | 18920 | 16697 |
+| `upscale: 1080p to 2160p, line art with restore` | the same, with restore and clamp | 25239 | 22799 |
+| `upscale: 480p` and `720p to 2160p, automatic` | ML first | skipped | skipped |
+
+- The stage's budget is 90% of the frame interval: 37.5 ms at 23.976, 15.0 ms at 59.94. All three cases that ran fit 23.976; none fits 59.94.
+- VT super resolution reports support on the A12 (it offers 1.5x and 2x at 720p), then fails every pass with `VCPFrameSuperResolutionProcessor failed`, also after 10 s of retries. GitHub's macOS runner VMs behave the same way (`FrameUpscalerTests` gates its ML tests on a real pass).
+- Before the fix, playback of a 720p SDR clip with `upscalesLowResolutionVideo` failed three frames, switched the stage off and reloaded on the native path: no upscaling at all. Now the stage drops the ML pass and carries on with MetalFX alone ([architecture-software.md › Low-resolution upscaling](architecture-software.md#low-resolution-upscaling)). The same 20 s clip at 23.976 fps then played upscaled to the end, 0 dropped frames, at 28.9 to 30.3 ms per frame (26.2 to 27.6 ms GPU) over 48-frame windows.
+- Playback costs half again what the bench measures (29.5 against 19.6 ms): the GPU lowers its clock under a regular load that leaves it idle part of each frame, as `FrameUpscaler.budgetFraction` describes.
+- The frame chain cases in the same run matched the earlier A12 numbers within 3%.
+
+### Two frames in flight on the A12 (AE#957)
+
+Measured on an Apple TV 4K (A12, tvOS 27.2.1) on 2026-11-15, in playback through the HDR10 probe host. The answer first: **with two frames in flight, the upscaler holds the decoder's thread a third as long, and the GPU time per frame does not change.**
+
+Current rule: [architecture-software.md › Two frames in flight on the GPU](architecture-software.md#two-frames-in-flight-on-the-gpu).
+
+**Why two.** An experiment on the same device timed MetalFX 720p to 2160p back to back: 17.7 ms per frame one at a time, 9.9 ms with two command buffers in flight. A third gave nothing more.
+
+**Playback.** The 20 s 720p SDR clip at 23.976 fps with `upscalesLowResolutionVideo`, MetalFX alone (the device refuses VT super resolution), means of 48-frame windows:
+
+| Build | Decoder's thread per frame | GPU per frame | Dropped frames |
+|---|---|---|---|
+| One frame at a time | 28.9 to 30.3 ms | 26.2 to 27.6 ms | 0 |
+| Two in flight | 9.0 to 10.8 ms | 23.8 to 28.1 ms | 0 |
+
+- Encoding takes about 1 ms. The rest of the 9 to 10 ms is waiting for a free slot, when the decoder runs ahead.
+- The GPU time is the same, so the frames do not get cheaper. The decoder's thread is free sooner, and the budget, which counts that time, is a quarter used instead of three quarters.
+- A seek to 3 s while playing and a seek to 12 s while paused both landed on their target, the paused one with its frame on screen. The clip played to the end with 0 dropped frames and no `settle` timeout.
+- The picture processing tone map (1000 to 600 nit) on the 4K 23.976 fps pattern held the decoder's thread 1.3 to 1.5 ms per frame, 0 dropped frames. 4K60 is not measured through the pipeline: the 4K60 test clip declares no HDR10 metadata, so the route is not taken.
+
 ### Software channel layout mismatch
 
 Measured per channel: a channel layout tag that disagreed with the resampler's order misplaced every layout except 5.0 and 5.1. The tag and the resampler layout now come from functions held against each other by a test.

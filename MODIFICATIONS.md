@@ -1,11 +1,11 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-18. Integration base: upstream 7.70.0
-(`3cfe848106482150209281c176ed72df5ac2674c`).
+Updated: 2026-11-23. Integration base: upstream 7.73.0
+(`bbcf3b8359252b361258dc79817c4f81683df7b8`). FFmpegBuild 3.19.0 (FFmpeg n8.1.3 unchanged).
 
 ## Current differences
 
-One change, not offered upstream yet. Otherwise the source matches 7.70.0 exactly, and this file and
+One change, not offered upstream yet. Otherwise the source matches 7.73.0 exactly, and this file and
 `COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as pull
 requests.
 

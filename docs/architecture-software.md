@@ -66,6 +66,8 @@ Source URL ──► Demuxer ──┬─► video decoder ──► [UpscalingF
 - One trigger is described in [AVC configuration changes](architecture-native.md#avc-configuration-changes).
 - `videoRoute` reports the move ([Effective video route](architecture.md#effective-video-route-videoroute)).
 
+**Inverse telecine on VOD.** Hard-telecined NTSC MPEG-2 film is sampled before the display criteria are written (`TelecineCadenceProbe`, #853). On film the deinterlace graph becomes `fieldmatch`, the deinterlacer for frames left combed, then `decimate`, and the session runs at 23.976 fps. On the GPU engine the two run after the upload as `fieldmatch_videotoolbox` and `decimate_videotoolbox` (AE#1108), with the CPU filters before the upload as the fallback. See [formats › Inverse telecine](formats.md#inverse-telecine).
+
 **Interlace check on VOD.** Interlaced H.264 comes here to be deinterlaced. On seekable VOD (#232) the declared field order is first checked against decoded frames (`InterlaceProbe`). The deinterlace filter engages on `AV_FRAME_FLAG_INTERLACED` alone. So if that flag never appears in a sample, the detour would do nothing, and the stream goes back to the native path.
 
 **AV1 capability registration is lazy.** The engine registers the supplemental VideoToolbox AV1 decoder and checks `VTIsHardwareDecodeSupported` (`VTCapabilityProbe`) only when routing an AV1 source, so devices with hardware AV1 take the native path. Loading H.264, HEVC or audio-only content does not consult it.
@@ -368,6 +370,7 @@ See [dolby-vision-fel.md, 5.2 Routing](dolby-vision-fel.md#52-routing) and [5.2.
 - After every decoder flush or drain (seek, error recovery, end of stream, a live seam) and in `stop()`, the host calls `settle()`. The frames still on the GPU reach the renderer before it flushes. `settle()` gives up after 0.5 s and logs `[FramePipeline] settle: ...`, because seek and stop call it on the main actor.
 - Each frame carries the generation its packet was read under, taken when the decoder hands it over, and goes out only while that generation is live (the AE#491 check). At delivery the demux loop may already read packets of the new position, so a check made only then would let a frame from before the seek through. A frame stale at hand-over never reaches the GPU.
 - A frame whose GPU work failed goes out as decoded.
+- A stage can answer `.drop` (from `begin` or a `.later` step's `resume`) when it has no picture for the frame: the frame frees its slot and nothing is delivered for it.
 - A command buffer iOS refuses because the app is in the background (`notPermitted`) also delivers the frame as decoded, and neither stage counts it as a failure. Before, three refused frames switched the stage off for the title.
 - A frame's work holds its plane textures and the texture cache they came from (`MetalTextureLease`). A `CVMetalTexture` calls back into its cache when it is freed and does not retain it, so a stage can now drop or rebuild its chain while frames are still on the GPU.
 - The budget counts the time a frame holds the decoder's thread: waiting for a free slot, then encoding. In steady state that is the stage's cost per frame.
@@ -386,6 +389,21 @@ A failed build of the frame chain or upscaler kernels is kept for 60 s, so it is
 A GPU without non-uniform threadgroups (the A10X in the first Apple TV 4K) cannot run `dispatchThreads`. There every kernel is dispatched in whole threadgroups, and each kernel's bounds guard drops the threads past the picture's edge.
 
 On the A12, 720p to 2160p through MetalFX holds the decoder's thread about 9.5 ms per frame instead of 29.5 ms. Numbers: [measurements.md › Two frames in flight on the A12](measurements.md#two-frames-in-flight-on-the-a12-ae957).
+
+#### 10-bit AV1 conversion
+
+The P010 conversion and film grain of 10-bit AV1 (`GPUFrameConverter`, [formats › AV1](formats.md#av1)) run in a pipeline of the same kind, inside `SoftwareVideoDecoder`. While one frame converts, dav1d decodes the next.
+
+- **Who.** Only the playback host, which sets `overlapsGPUConversion` before it opens the decoder. The probe, the still extractor and the tests read a frame as soon as `decode` returns, so they keep the conversion that waits for each frame.
+- **Order.** Every frame of that decoder goes through the pipeline, one converted on the CPU included, so frames leave in decode order. The frame handler then runs on the pipeline's delivery queue.
+- **Buffers.** The converter has one set of per-frame buffers (uniforms, grain templates, scaling, offsets, staging) for each frame that can be on the GPU. A frame's work is encoded in the pipeline's `begin`, after the wait for a free slot, so the set it writes belongs to a frame already delivered.
+- **The picture.** The GPU reads dav1d's picture in place. The frame's work holds a reference to it until the work completes, because the decoder reuses its frame as soon as `submit` returns.
+- **Seeks.** Each frame carries the feed epoch it was emitted under (AE#492) and goes out only while that epoch is live. `flush()` moves the epoch on, so the frames still on the GPU are retired with the undecoded packets, and it waits for them before it returns. `drainForEndOfStream()` waits for the last frames, and `close()` for any left, so the host's own flush and drain order is unchanged.
+- **Failure.** A frame whose GPU work fails is converted with `sws_scale` when the work completes, without its grain, as when the waiting conversion fails. A frame that never reaches the GPU is converted on the decoder's thread. A frame neither converts is dropped, as the waiting conversion drops it, because its pixel buffer was never written. So the decoder commits the work in a `.later` step, whose `resume` can answer `.drop` once the work completed.
+- **Grain tables.** The frame's film grain tables (`AV1FilmGrainTables`) are built on the decoder's thread when its work is encoded. Their loops run with `while` over raw pointers, so a host's Debug build, which compiles the package unoptimised, keeps up too: written with `Array` and `for ... in` they took the whole frame interval there.
+- **Log.** Every 240 frames the converter logs `[GPUFrameConverter] last 240 frames: encode ... ms, GPU ... ms, decoder thread held ... ms per frame`, ending in `(overlapped)` on this route and `(waited for each)` on the other.
+
+Waiting for each frame held a 1080p 10-bit episode below its 24 frames a second on an Apple TV 4K (A15) in a host's Debug build, so the clock paused to rebuffer every few seconds; most of each frame's time there was the grain tables. Numbers: [measurements.md › 10-bit AV1 conversion on the A15](measurements.md#10-bit-av1-conversion-on-the-a15).
 
 ### HDR10 pass-through probe
 
@@ -419,6 +437,12 @@ The 2:3 pulldown retimer is not an optional stage. It is part of the native rout
 One table, kept with the native side, shows how each audio route sits on this host next to the native one: stream copy of E-AC-3 JOC, PCM decode, the object-audio render through `SoftwareAPACProducer`, and how `SoftwareAtmosRoute` picks per track. See [architecture-native.md, Audio routes and object audio](architecture-native.md#audio-routes-and-object-audio).
 
 The channel layout and timestamp rules of the PCM decode are under [Audio channel layout and timestamps](#audio-channel-layout-and-timestamps).
+
+**AC-3 and E-AC-3 play with their full dynamics.** FFmpeg's Dolby decoders apply the stream's dynamic range compression unless told otherwise. Apple's decoder on the native path does not (unless the viewer turns on Reduce Loud Sounds). So every FFmpeg decoder whose output is heard opens through `AudioDecoderOptions` with `drc_scale` 0. That covers `AudioDecoder` (this host, the audio-only host and the lazy tap use it), the `AudioBridge` decode and `AudioTapDecoder`. Apple's decoder ignores dialnorm just like FFmpeg's, measured on AC-3 encoded at dialnorm -31 and -20. Both decoders put out the same level for both.
+
+- Before, a session that moved here (for example for upscaling) played quieter than the same title on the native path. On an E-AC-3 5.1 film it was -18.6 LUFS against Apple's -16.8, with peaks 1.5 dB lower, and -16.6 LUFS once the compression was off.
+- A host that wants a compressed sound sets it with `AudioShaping`, the same on both paths.
+- E-AC-3 JOC on this host goes through Apple's converter (`SoftwareEAC3AtmosDecoder`) or stays compressed, so it was never affected.
 
 ## Audio tap
 
@@ -602,6 +626,10 @@ The cache frontier is how far ahead of the playhead the cache provably holds pla
 
 - A cached seek restores a retained keyframe cursor, including an earlier keyframe for available preroll, and keeps the producer at its existing source frontier.
 - AV1 through dav1d restores to the last keyframe at or before the target instead (`anchorsOnLastKeyframe`). An AV1 keyframe opens on its own, and the earlier one only cost dav1d a whole GOP of decode before the picture came back.
+- A cached seek also needs audio for the target, and a keyframe's record does not always lead to it. With audio muxed in long blocks (DASH `SegmentBase` with 10 s audio fragments against 5 s video ones), the audio for a keyframe is stored before that keyframe, and a restore at the keyframe played up to a whole block silent (AE#1093).
+- So the read-ahead keeps audio restart points as well: one key-flagged audio packet every 0.25 s, pruned with the history. A hit picks the latest point at least 0.2 s before the target (decoder warm-up) and no more than 5 s before it.
+- When that point comes before the video keyframe in the spool, the restore starts there and the consumer drops the video records in between, so the decoder does not run a GOP it would throw away. Otherwise the restore is the keyframe's, as before.
+- No usable audio point means a cache miss and a source seek, never a silent hit. libavformat flags every packet of an intra-only audio codec as a key packet, TrueHD only on a major sync, so this only turns away audio that really cannot restart there.
 - A cache miss clears coverage and repositions the demuxer. Discarding the spool is the worker's job, not the seek's: removing every retained chunk costs more the longer the session has kept them, and no seek waits on it.
 - Consumer generations and source epochs are separate counters. A cached seek must not discard a producer packet in flight, and a superseded consumer must not steal the first packet of a new source epoch.
 - Admission applies equally to packet, EOF, error and delayed end-of-media callbacks.

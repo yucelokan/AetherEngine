@@ -112,10 +112,11 @@ The plan needs the source's keyframe positions, read from the container's keyfra
 
 The uniform fallback anchors segment 0 at the content start, so a title that starts late does not advertise empty leading segments.
 
-**Declared boundaries come first.** Two sources say where their random-access points are, and the plan is cut on those instead of on the index (`buildSegmentedSourcePlan`):
+**Declared boundaries come first.** Three sources say where their random-access points are, and the plan is cut on those instead of on the index (`buildSegmentedSourcePlan`):
 
 - **HLS VOD ingest:** the playlist's segment starts, summed from `EXTINF` (#268).
 - **MPEG-DASH:** the video `sidx`, which marks each subsegment that starts with a SAP (a random-access point) and gives its time (AE#1075). Only SAP types 1 and 2 count (closed GOP). If one subsegment lacks such a SAP, the source declares nothing and the plan falls back as above.
+- **Fragmented MP4 with a lazy index:** the `mfra`'s video random-access points, when they do not agree with the fragments the demuxer has read. When they agree, they stand in for the full index and the keyframe-aligned plan is built from them ([Fragmented MP4 over HTTP](formats.md#fragmented-mp4-over-http)).
 
 Each boundary is pulled up to 0.5 s below its declared time. The declared time and the container timestamp can differ by rounding, and a boundary that lands past its keyframe would open the segment one GOP late.
 
@@ -230,6 +231,19 @@ A restart is the expensive path: it re-seeks the demuxer, which is slow on remot
 - A seek back into the retained span, and the forward march after it, is a pure cache hit with zero producer restarts. Only a seek into never-produced content restarts.
 - Live sessions keep a newest-first suffix up to the native DVR retention budget, so the whole advertised DVR window stays resident. Live has no restart handler that could re-produce a deleted segment.
 
+**A cache that outlives its session (opt-in, AE#1095).** With `retainsSessionCacheAfterStop`, the host's `stop()` moves the sealed segments into a parked directory (`ParkedSegmentSession`, one per process in `ParkedSegmentSessionStore`) instead of deleting them. The next session for the same source adopts the ones below the first gap at its start position and starts its producer at that gap. That is the state a session is in after a restart ahead of a playhead that still plays from the cache, so the provider needs no new rule. Three things travel with the files, because the bytes alone do not describe the segments:
+
+- the `EpochAxisTable` below the gap, plus an opening at the start segment, so the fresh item's first placement publishes the axis the bytes carry (without it a source with a 600 s origin reopened at -557 s);
+- each segment's `VideoReach` and the fold counts;
+- the `SubtitlePacketStore` with its coverage, because the new pump never reads the adopted span.
+
+The key that decides reuse is the URL, the options without the diagnostics label, the session's own derived output configuration (`ParkingOutputConfiguration`) and the segment plan.
+
+Two things keep a Resume of a file without a keyframe index from paying the index work again:
+
+- The candidate is taken before the cue prewarm. When the parked session's prewarm hit its cap and its plan fell back to the uniform stride (`ParkedSegmentSession.UnindexedSource`, the file's byte size and duration), a load of the same file skips the prewarm. On a remote MKV without Cues that was the whole 10 s cap before every Resume.
+- A session that adopted segments seeks its first producer on the pump thread (`HLSSegmentProducer.positionBeforeFirstRead`) instead of in `prepare()`. Without an index that seek is a linear read up to the frontier, and the playhead has the adopted span to play meanwhile. A restart that meets the pump still in it takes the wedged-read path (fresh demuxer after 5 s).
+
 **Whole-source prefetch (opt-in).** A forward window larger than that is an explicit host opt-in through `LoadOptions.forwardBufferSegments` (up to 2700 segments, ~3 h, #207). It drops the budget's 2 GiB default cap but keeps the quarter-of-free-space clamp.
 
 The producer parks once the segments it has written ahead of the consumer target fill that budget, and resumes as eviction behind the playhead frees room (`PrefetchDiskBudget`). So an opt-in prefetch follows the disk budget, not the source length.
@@ -276,10 +290,11 @@ Every accepted seek emits `.began` and then exactly one of `.landed(renderedTime
 
 One asymmetry is deliberate: a `.stalled` seek stays alive as recovery intent, so its `.landed` can still arrive minutes later on a source that finally serves the target. No level signal can express that.
 
-Three paths feed the stream:
+Four paths feed the stream:
 
 - **Programmatic seeks** report from their finalize step, so the clock is already at the target when the event fires.
 - **Seeks stashed before the session can take them** (#127/#178) hold the level for the whole stash window. The engine publishes their target on `currentTime` optimistically, and a consumer that broadcasts it needs to know nothing has reached it yet.
+- **Remote command and PiP skips** (AE#1088) go through the programmatic path, with origin `.remoteCommand` or `.pictureInPicture`. `SoftwareNowPlayingPolicy.perform` hands the engine the position it computed the target from, and that becomes the event's `departure`.
 - **Native AVKit scrubs** end their window when the picture reaches the restarted region, watched on `$renderedTime` and capped at 8 s.
 
   They do not end when the coalesced producer restart drains. Draining only means the producer is producing at the new index; the picture arrives a fetch and a decode later ([measured](measurements.md#native-scrub-picture-latency)).
@@ -538,7 +553,7 @@ Some HLS sources AVPlayer cannot play directly, so the engine reads them itself 
 
 | Reader | What it does | When the engine routes onto it |
 | --- | --- | --- |
-| `HLSLiveIngestReader` | Picks the highest-bandwidth variant, polls the media playlist, prefetches segments and commits them in playlist order. A demuxed audio rendition gets a companion reader. AES-128 clear-key segments are decrypted on the way (`HLSSegmentDecryptor`); fMP4 segments (`EXT-X-MAP`) end the session with an `HLSIngestError`. | A known HLS playlist URL on the live path with `nativeRemoteHLS` off (AE#678). A bypass that built no video track for a master that advertises one, typically HEVC in MPEG-TS (#168); the verdict is remembered per master (#199), and `HLSCarriageProbe` can settle it early from the playlist and the first segment's PMT (AE#293). |
+| `HLSLiveIngestReader` | Picks the highest-bandwidth variant, polls the media playlist, prefetches segments and commits them in playlist order. A demuxed audio rendition gets a companion reader. AES-128 clear-key segments are decrypted on the way (`HLSSegmentDecryptor`); fMP4 segments (`EXT-X-MAP`) end the session with an `HLSIngestError`. | A known HLS playlist URL on the live path with `nativeRemoteHLS` off (AE#678). A bypass that built no video track for a master that advertises one, typically HEVC in MPEG-TS (#168); the verdict is remembered per master (#199), and `HLSCarriageProbe` can settle it early from the playlist and the first segment's PMT (AE#293), decrypting the head of an AES-128 segment first (AE#1089). |
 | `HLSVODIngestReader` | One finite playlist. A seek restarts at the segment before the target, on an elapsed-time axis, and the demuxer's packet gate drops frames before the exact target. With `heldSourceConnection`, every request goes over one persistent HTTP/1.1 connection per origin (`PersistentHTTP1Transport`, AE#732). | A finite HEVC-in-MPEG-TS VOD, at load (AE#268). Any finite MPEG-TS playlist with `preferredDecodePath = .software`, which then decodes on the software host (AE#990). |
 
 ### MPEG-DASH
@@ -552,9 +567,10 @@ Scrub images (the thumbnails shown while the viewer drags the timeline) come fro
 - **Cache-backed stills.** `scrubThumbnail` decodes what the session holds: the loopback segment cache on the native route (`AetherEngine+ScrubThumbnail.swift`), and the DVR packet ring (the buffer of recent live packets) or the packet cache on the software host (`SoftwareStillExtractor`). The software extractor drives a real `SoftwareVideoDecoder`, so deinterlacing and pixel aspect match the picture on screen.
 - **Sparse still ladder.** For VOD stretches nothing resident covers, `KeyframeStillLadder` reads one keyframe per rung (one evenly spaced position) off the source while the link is idle. It uses a slot of the pump's per-origin request budget (`generatesBackgroundScrubPreviews`). A one-request origin gets no ladder (AE#937).
 - **I-frame rendition.** With `serveIFramePlaylist` (AE#682), the master lists an I-frame playlist (a playlist of keyframes only), so a stock `AVPlayerViewController` shows scrub thumbnails with no host code. The local server answers `iframe_init.mp4` and `iframe{N}.mp4` through `IFrameRendition`:
-  - `IFrameSideReader` reads the keyframe that opens plan segment N on a demuxer of its own, one request at a time, and `IFramePayloadCache` keeps it on disk.
+  - `IFrameSideReader` reads the keyframe that opens plan segment N on a demuxer of its own, one request at a time, and `IFramePayloadCache` keeps it on disk. Its Range follows the largest keyframe it has read so far (`IFrameSideReader.rangeCap`, at least the 256 KB AVIO buffer), instead of the 1 MB chunk a 30 KB keyframe used to cost.
+  - `IFrameRequestGate` decides which request reads next. The newest request goes first, because when a scrub moves on, the frame under the finger matters and the ones it passed do not. The ladder's prefetch goes only when no request waits. A request whose client closed the connection while it waited reads nothing (`HLSLocalServer.peerHasClosed`).
   - `IFrameFragmentBuilder` wraps it in one fMP4 fragment on the main rendition's timeline. Each fragment gets a fresh muxer, because AVKit asks for I-frames in any order.
-  - The still ladder fills the rendition ahead of AVKit (`IFrameRendition.prefetch`). While the rendition is served, the ladder reads through it instead of opening a reader of its own: first every segment within `KeyframeStillLadder.iFrameWindowSegments` (30) of the playhead's, then its coarse rungs. For a JPEG rendition it builds the fragment inside that window too. Without this, every thumbnail waited on its read (and for HDR on decode, tone map and encode), and AVKit showed its grey placeholder in the meantime.
+  - The still ladder fills the rendition ahead of AVKit (`IFrameRendition.prefetch`). While the rendition is served, the ladder reads through it instead of opening a reader of its own: first every segment within `KeyframeStillLadder.iFrameWindowSegments` (30) of the playhead's, then its coarse rungs. The window reads back to back while the link stays idle: each read that lands starts the next one instead of waiting for the 1 Hz tick and the ladder's 2 s gap (`fineWindowSpacingSeconds`). The coarse rungs keep that gap. For a JPEG rendition it builds the fragment inside that window too. Without this, every thumbnail waited on its read (and for HDR on decode, tone map and encode), and AVKit showed its grey placeholder in the meantime.
   - HDR and Dolby Vision sources get one SDR Motion JPEG per keyframe instead (`IFrameJPEGBuilder`), because the tvOS scrubber gives up on PQ I-frames.
   - The rendition is all or nothing (`IFrameRenditionEligibility`). Live sessions, sequential and held origins, serial origins, disc sources and plans whose boundaries are not keyframes list none.
 
@@ -680,6 +696,16 @@ The coverage ledger ([below](#the-landing-after-a-seek)) knows both cases. `harv
 - So every pair at the main reader's front descends. A drain that stopped at each one would never get more than a few seconds ahead of the playhead, and a host's advance offset would show nothing until the first seek.
 
 So where the ledger has heard from a reader, it is the whole answer, both for a cut and for the end of a wait. A pair whose span some run read is decoded through; one nobody read is a hole, whatever the sequences say. Order stays the rule only on a store whose readers never report coverage.
+
+**The ground in front of the first packet (AE#1104).** A reset after a seek has no packet in front of its first entry, so no pair covers that stretch. A backward seek past the session's earliest reading shows why it matters:
+
+- A file opened at 46.2 s holds only what the load read, from 27.5 s on.
+- After a seek to 0 that island is the first entry in the window, and the stretch from 0 to 27.5 s is unread.
+- Decoding the island first put the cursor past it, so the cues the readers then found from 0 s on were stored behind the cursor and never shown.
+
+So a reset also asks the ledger about the stretch from its window start (clamped at 0, like every reader's read start) to the first entry. Unread means the tick decodes nothing, leaves the cursor at the window start and waits there, under the same rules as any other wait. Without a ledger the reset decodes as before, since order has nothing to compare at a window boundary.
+
+One case is still open. A first entry that is already due (within the release lead of the playhead) decodes at once, so the landing line is never held back. If the ground in front of it is unread, a cue that starts there and is still on screen at the landing arrives behind the cursor and is not shown. That takes a short backward seek into a stretch the session never read. A cursor that steps back for packets stored behind it would close it.
 
 On a link near the media bitrate, two more rules make this work:
 

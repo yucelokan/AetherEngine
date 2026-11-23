@@ -550,7 +550,7 @@ extension AetherEngine {
                 sequenceAt: { entries[$0].sequence },
                 held: held?.harvestGap,
                 resumeFrom: held.map { ($0.lastDecodedPts, $0.lastDecodedSequence) },
-                isReset: isReset,
+                resetFrom: isReset ? window.from : nil,
                 releaseAt: playhead + Self.subtitleDrainHarvestGapReleaseLeadSeconds,
                 isRead: store.harvestReadCheck())
             work.channels.append(SubtitleDrainChannelWork(
@@ -635,9 +635,12 @@ extension AetherEngine {
                 lastDecoded = entry.ptsSeconds
                 lastDecodedSequence = entry.sequence
             }
-            if case .resetAndDecode = plan, batchEnd == 0 {
-                // Fresh window with nothing stored yet: anchor just behind the window start so
-                // steady ticks rescan it without re-triggering the discontinuity path.
+            if isReset, decodeEnd == 0 {
+                // Fresh window with nothing stored yet, or (AE#1104) nothing read in front of its
+                // first entry: anchor just behind the window start so steady ticks rescan it without
+                // re-triggering the discontinuity path. The old cursor is where the seek left.
+                // Not clamped at 0 like the AE#1104 hold: the next tick decodes from just past
+                // here, and a cursor on 0 would skip a packet stamped exactly 0.
                 lastDecoded = window.from
                 lastDecodedSequence = 0
             }
@@ -2106,7 +2109,7 @@ extension AetherEngine {
         }
     }
 
-    /// Disable primary subtitles, clear cues, cancel sidecar task + side demuxer, cancel multi-decode reader, clear native mov_text stores (#55, all-tracks). `nativeSubtitleTracks` is NOT cleared: the host needs the list to re-select after an audio/subtitle switch; only `stop()` / `load()` reset it.
+    /// Disable primary subtitles, clear cues, cancel sidecar task + side demuxer, cancel multi-decode reader. The native rendition stores keep their cues (the provider serves them for the whole session, AE#1052), and `nativeSubtitleTracks` is NOT cleared: the host needs the list to re-select after an audio/subtitle switch; only `stop()` / `load()` reset it.
     public func clearSubtitle() {
         externalSubtitleIntentGeneration &+= 1
         hostExplicitSubtitleAction = true
@@ -2153,15 +2156,10 @@ extension AetherEngine {
         sidecarASSHeader = nil
         isLoadingSubtitles = false
         cancelNativeSubtitleReaders()
-        // Sodalite#32 Phase 2: with the pump tap active the stores are the session's cue source of
-        // truth (the tap's decoder dedup would never refill a cleared store), so subtitles-off keeps
-        // them; only the reader-driven path tears them down.
-        if nativeVideoSession?.subtitleTapActive != true {
-            nativeVideoSession?.nativeSubtitleCueStoresForSession.forEach { $0.clear() }
-            nativeVideoSession?.nativeSubtitleCueStoresForSession = []
-            nativeVideoSession?.nativeSubtitleLanguagesForSession = []
-            nativeSubtitleRenditionAvailable = false
-        }
+        // The native stores stay. The provider got them at init and serves them for the whole
+        // session, so dropping the session's list here (as the reader-only path once did) only cut
+        // the engine off from them: a later marker silenced nothing and the OCR worker found no
+        // store, while the server went on answering from the old ones (AE#1052, tvOS seek stall).
     }
 
     func cancelSidecarTask(channel: SubtitleChannel = .primary, preservingActiveBitmap: Bool = false) {
@@ -2729,12 +2727,19 @@ extension AetherEngine {
             cancelNativeSubtitleReaders()
         }
         // AE#1052: set before the select, so the first fetch of a marker is already empty and the
-        // first fetch after it (PiP entry) already has cues.
-        silenceNativeRendition(ordinal: marker ? ordinal : nil)
-        guard let item = currentAVPlayer?.currentItem else { return }
+        // first fetch after it (PiP entry) already has cues. A marker this call leaves for anything
+        // but its own display goes loud only once the select below has landed.
+        let pendingLift = silenceNativeRendition(ordinal: marker ? ordinal : nil,
+                                                 displaying: marker ? nil : ordinal)
+        guard let item = currentAVPlayer?.currentItem else {
+            Self.liftNativeSilence(pendingLift)
+            return
+        }
         // Capture track list; avoid capturing self to keep MainActor re-entrancy to one hop.
         let tracks = nativeSubtitleTracks
         Task { @MainActor in
+            // A newer call took over these stores and decides for itself.
+            defer { if generation == nativeSubtitleSelectGeneration { Self.liftNativeSilence(pendingLift) } }
             // #15: with automatic media-selection criteria on (the default), AVKit can override/not-render an
             // explicit legible selection until a view refresh. Pin manual selection so the explicit choice
             // renders immediately and survives.
@@ -3271,10 +3276,28 @@ extension AetherEngine {
 
     // MARK: - Menu marker (AE#1052)
 
-    /// Only the marker's store answers empty; every other rendition serves as usual.
-    func silenceNativeRendition(ordinal: Int?) {
-        guard let stores = nativeVideoSession?.nativeSubtitleCueStoresForSession else { return }
-        for (index, store) in stores.enumerated() { store.servesSilently = index == ordinal }
+    /// Only the marker's store answers empty; every other rendition serves as usual. A store that
+    /// stops being the marker for anything but its own display (`displaying`) is handed back still
+    /// silent: AVKit fetches the old rendition until the new select lands, and a loud store nothing
+    /// fills holds each of those fetches for the full 3 s readiness wait (AE#1052, reporter's log
+    /// after a pick and Off on a five-PGS file).
+    func silenceNativeRendition(ordinal: Int?, displaying: Int?) -> [NativeSubtitleCueStore] {
+        guard let stores = nativeVideoSession?.nativeSubtitleCueStoresForSession else { return [] }
+        var pendingLift: [NativeSubtitleCueStore] = []
+        for (index, store) in stores.enumerated() {
+            if index == ordinal {
+                store.servesSilently = true
+            } else if store.servesSilently, index != displaying {
+                pendingLift.append(store)
+            } else {
+                store.servesSilently = false
+            }
+        }
+        return pendingLift
+    }
+
+    nonisolated static func liftNativeSilence(_ stores: [NativeSubtitleCueStore]) {
+        for store in stores { store.servesSilently = false }
     }
 
     // MARK: - Remote-HLS bypass legible selection (AE#154)

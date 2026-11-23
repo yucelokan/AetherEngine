@@ -529,7 +529,7 @@ extension HLSVideoEngine {
             return
         }
         let metered = OriginRequestBudget.shared.refusedRecently(
-            sourceURL, within: Self.rateLimitVerdictWindowSeconds)
+            refusalBooksURL, within: Self.rateLimitVerdictWindowSeconds)
 
         let reviveProgress = cache?.totalStoredCount ?? 0
         restartLock.lock()
@@ -538,6 +538,8 @@ extension HLSVideoEngine {
         let cap = metered ? 0 : readErrorReviveGate.maxAttempts
         let spent = metered ? rateLimitReviveGate.elapsedSeconds() : 0
         let budget = rateLimitReviveGate.budgetSeconds
+        let ceilingHit = !metered && readErrorReviveGate.refusedByCeiling
+        let ceiling = readErrorReviveGate.ceiling
         if admitted { mainDemuxerSuspectDead = true }
         restartLock.unlock()
         guard admitted else {
@@ -552,11 +554,21 @@ extension HLSVideoEngine {
                     + "across \(attempts) attempts); giving up. The source is REFUSING us, "
                     + "not lost: retrying this same request later is expected to work, and handing "
                     + "off to another player will meet the same refusal."
-                    + OriginRequestBudget.shared.refusalShapeNote(for: sourceURL),
+                    + OriginRequestBudget.shared.refusalShapeNote(for: refusalBooksURL),
                     category: .session
                 )
                 surfaceVODSourceFailure(code, "Source is rate limiting this session",
                                         kind: .sourceRateLimited)
+                return
+            }
+            if ceilingHit, let ceiling {
+                EngineLog.emit(
+                    "[HLSVideoEngine] AE#1085 VOD readError revive ceiling reached "
+                    + "(\(ceiling.maxRevives) revives already in the last \(Int(ceiling.windowSeconds))s); "
+                    + "giving up so the host decides whether to reopen this source",
+                    category: .session
+                )
+                surfaceVODSourceFailure(code, "Source read failed")
                 return
             }
             EngineLog.emit(
@@ -1178,8 +1190,15 @@ extension HLSVideoEngine {
             do {
                 switch transport {
                 case .url:
-                    try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders,
-                                 profile: openProfile.withRequestHeaders(requestHeaders), isLive: true)
+                    // AE#1100: an origin that replays its session on the same URL gets a fresh one.
+                    let reopenURL = liveReopenURL?(sourceURL) ?? sourceURL
+                    if reopenURL != sourceURL {
+                        EngineLog.emit("[HLSVideoEngine] AE#1100 live reopen attempt \(attempt): on the URL the host handed over",
+                                       category: .session)
+                    }
+                    try dem.open(url: reopenURL, extraHeaders: sourceHTTPHeaders,
+                                 profile: openProfile.withRequestHeaders(requestHeaders)
+                                    .withLiveReopenURL(liveReopenURL), isLive: true)
                 case .customFactory:
                     // #199: fresh engine-created ingest reader over the same channel; the dead
                     // reader's construction inputs are immutable, so this rejoins at the live edge.

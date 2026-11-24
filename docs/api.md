@@ -453,7 +453,7 @@ Both refusals are thrown BEFORE any teardown, so a refused correction leaves the
 | `AetherEngineError.sessionNotReloadable(_:)` | there is no session, or the source is a custom `IOReader` that reported itself non-seekable and cannot be reopened at the current position. Its `SessionReloadRefusal` says which (`.noActiveSession` / `.customSourceNotSeekable`); a correction can also throw the cases below. |
 | `AetherEngineError.sessionNotReloadable(.softwarePathCannotRepresentSource)` | the correction moves a native session onto the software path, and the source's only signal is IPT-PQ-c2 (Dolby Vision HEVC Profile 5 or 20, AV1 Profile 10.0). The software decoders pass that on as YCbCr, so the picture would render green/purple. |
 | `AetherEngineError.sessionNotReloadable(.dualLayerRouteNeedsFreshLoad)` | the correction changes `preferDualLayerDolbyVision` (or `dolbyVisionHandling` or `dualLayerRoute` while the preference is on) on a custom `IOReader` Profile 7 session. The in-place rebuild keeps the route the session was loaded with; call `load()` again with the new option. |
-| `AetherEngineError.sessionNotReloadable(.upscaleRouteNeedsFreshLoad)` | the correction turns `upscalesLowResolutionVideo` on, or changes `upscaleScaler` while it is on (AE#1039), for a custom `IOReader` session. Call `load()` again with the new option. See note 2. |
+| `AetherEngineError.sessionNotReloadable(.upscaleRouteNeedsFreshLoad)` | the correction turns `upscalesLowResolutionVideo` or `upscalesFullHDVideo` on, or changes `upscaleScaler` while the former is on (AE#1039), for a custom `IOReader` session. Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.videoProcessingRouteNeedsFreshLoad)` | the correction turns `videoProcessing` on, or changes its target while it is on, for a custom `IOReader` session (#957). Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.untaggedVideoColorNeedsFreshLoad)` | the correction changes `untaggedVideoColor` for a custom `IOReader` session (AE#1103). Call `load()` again with the new option. See note 2. |
 | `AetherEngineError.sessionNotReloadable(.demuxedAudioLiveIsNativeOnly)` | the correction moves a demuxed-audio live session onto the software path. The side-audio merge does not exist there, so it would play silent. |
@@ -620,6 +620,7 @@ It is not a `PlaybackErrorKind`, because those are terminal: `state` moves to `.
 | `pictureInPictureActive` | governs the background teardown decision at the moment it happens |
 | `logTag` | written into the shared-output book when the load joins it; a tag set later is missing from those log lines until the next `load()` |
 | `rendererAudioSessionActivationEnabled` | read by software and audio-renderer loads; see [Host-managed renderer audio activation](#host-managed-renderer-audio-activation) |
+| `nativeAudioSessionActivationEnabled` | read after the play gate of each native load and in-place native reload; see [Native activation for hosts on the bare player layer](#native-activation-for-hosts-on-the-bare-player-layer-ae1110) |
 
 #### `LoadOptions` that cost a reload to change
 
@@ -709,6 +710,8 @@ try await player.reloadAtCurrentPosition()
 
 1. **`reloadAtCurrentPosition()` with nothing to reload.** On a custom source it throws `sessionNotReloadable` when there is no session or the reader is forward-only (AE#526). On a URL source with no session it returns without doing anything. Read `sessionReloadRefusal` first to tell the two apart.
 2. **`prepareForItemReplacement()`** is for a host that mounts the engine's own player layer. Without it, that layer shows black across the nil-item gap of a foreground episode or playlist change. The next `load()` consumes it, `stop()` cancels it, and it has no effect when the outgoing session is not native. PiP hosts do not need it: an active PiP window already forces the handover (AE#158).
+
+   It keeps the outgoing item's picture, not a still of it. A host that shrinks the outgoing picture into a tile uses `holdOutgoingPicture(on:)` instead, and not both: with the handover the full-size paused picture stays under the tile until the next item mounts. See [Held pictures across an episode change](#held-pictures-across-an-episode-change).
 3. **`stop` parameters.** `resetDisplayCriteria: false` keeps the panel in its current mode across an item handoff. `finalTeardown` (default: the value of `resetDisplayCriteria`) says the host is leaving playback, not handing off to another `load()`. Only a final teardown honours `deactivatesAudioSessionOnStop`. To keep the panel mode and still release the session, pass `resetDisplayCriteria: false, finalTeardown: true`.
 
 A custom source (`IOReader`, the disc-folder readers) is described under [Custom byte sources](#custom-byte-sources-ioreader).
@@ -1127,7 +1130,7 @@ Prefer `$playbackPhase` over stitching `state` + `isBuffering` + `isSeeking` tog
 - **It adds** `.rebuffering` and `.stalled(reconnecting:)`.
 - **Precedence**, highest first: `error > ended > idle > loading > stalled > seeking > rebuffering > playing/paused`. A source that stopped delivering stays visible while a seek is in flight, because no seek can land over it; `isSeeking` / `seekEvents` still carry the seek (#410).
 - **`.stalled(reconnecting: true)`** is a reader that is retrying. **`false`** is a reader that has used up its retries and handed recovery to the producer's reopen. Both mean the source is down.
-- **`.rebuffering`** is published on the AVPlayer-backed paths: the native loopback session, direct remote HLS, and the bare-AVPlayer audio host (a starved progressive stream, once the item has played). `.stalled` cannot occur there, because there is no reader. The software video host publishes it too, from the moment one of its pumps pauses the synchronizer to refill (a dry ring at the live edge, or an audio lead used up on demand).
+- **`.rebuffering`** is published on the AVPlayer-backed paths: the native loopback session, direct remote HLS, and the bare-AVPlayer audio host (a starved progressive stream, once the item has played). `.stalled` cannot occur there, because there is no reader. The software video host publishes it too, from the moment one of its pumps pauses the synchronizer to refill (a dry ring at the live edge, a dry source on live without a DVR window, or an audio lead used up on demand).
 - A source whose connection is retrying reads as `.stalled` on the FFmpeg-backed hosts (software video, FFmpeg audio) once the reader's ladder is running.
 
 #### Seek events
@@ -1815,12 +1818,13 @@ If you need it, say so on the tracker instead of working around it.
 | Symbol | Notes |
 | --- | --- |
 | `videoGravity` | Fill mode of whichever layer is mounted (`AVPlayerLayer` or the software display layer). Settable; this is the aspect-fit / aspect-fill control. |
-| `AetherStillView`, `bindStillView(_:)`, `unbindStillView(_:)` | Holds the outgoing picture across an item swap, for a host that renders the native path through AVKit rather than `AetherPlayerView`. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). |
+| `AetherStillView`, `bindStillView(_:)`, `unbindStillView(_:)` | Holds the outgoing picture across the item swap of an audio switch, for a host that renders the native path through AVKit rather than `AetherPlayerView`. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). An `AetherStillView` is also the surface for `holdOutgoingPicture(on:)`. |
 | `heldPictureFrameWaitSeconds` | The longest a native audio switch waits for the outgoing frame it holds. Default 0.5 s. See [Held pictures across an audio switch](#held-pictures-across-an-audio-switch). |
+| `holdOutgoingPicture(on:)`, `releaseOutgoingPicture()` | Holds the outgoing picture on an `AetherStillView` the host places, across the host's own next `load()`, until the host releases it. For an episode change that shrinks and fades the old picture. See [Held pictures across an episode change](#held-pictures-across-an-episode-change). |
 | `nativePlayerLayer` | The engine's own `AVPlayerLayer`, for a host building `AVPictureInPictureController` around a layer rather than around `currentAVPlayer`. |
 | `$softwarePiPSource` | `SoftwarePiPSource` for sample-buffer PiP on the software path. See [Picture in Picture on the software path](#picture-in-picture-on-the-software-path). |
 | `$softwareDisplaySize` | The rectangle the software path's picture is shown at: the coded size under the decoder's pixel aspect. It follows the stream (not latched), so a mid-stream resolution change reshapes it. nil on every other path. |
-| `$activeUpscale` | `UpscaleStatus?`: what the low-resolution upscale stage (`LoadOptions.upscalesLowResolutionVideo`, #846) does for this session. See [Upscale status](#upscale-status). |
+| `$activeUpscale` | `UpscaleStatus?`: what the upscale stage (`LoadOptions.upscalesLowResolutionVideo`, #846, or `upscalesFullHDVideo`) does for this session. See [Upscale status](#upscale-status). |
 | `$activeVideoProcessing` | `VideoProcessingStatus?`: what the picture processing (`LoadOptions.videoProcessing`, #957) does for this session. See [Picture processing status](#picture-processing-status). |
 | `sourceVideoWidth`, `sourceVideoHeight`, `sourceVideoPixelAspectRatio` | The source's CODED size, and the multiplier that turns it into the presented one (`width * ratio`), read once from the probe. See note 1. |
 | `pictureInPictureActive` | Host-set. Keeps the pipeline and the loopback server alive across a background transition, and keeps the software path decoding video for the window. |
@@ -1853,6 +1857,33 @@ An audio-track switch swaps the item in place, and `replaceCurrentItem` blanks t
   - `heldPictureFrameWaitSeconds` changes the bound. 0 holds nothing on the native path, and values above 3 s are read as 3 s.
   - The Dolby Vision bullet above and the software path are not affected.
 - Nothing is held in PiP or on external playback.
+
+### Held pictures across an episode change
+
+`holdOutgoingPicture(on:)` keeps the outgoing episode's picture on screen while the host loads the next one, on an `AetherStillView` the host gives it. The host can shrink and fade that view, and it decides when the picture comes down (AE#1113).
+
+```swift
+let tile = AetherStillView(frame: playerBounds)   // placed above the video, below the controls
+await engine.holdOutgoingPicture(on: tile)
+try await engine.load(url: nextEpisode, options: options)
+// Animate tile's frame and alpha. Start when the next item shows its first frame:
+//   engine.$hasFirstFrameReadyForDisplay turns true after the load
+engine.releaseOutgoingPicture()   // once the fade is done
+```
+
+- **What is held.** The frame on screen, read by the same routes an audio switch uses: the native output, the software renderer, and for Dolby Vision without a displayable base layer the compositor or the reshaped still. An HDR source is held as HDR. Panel mode across the load is unchanged, since a `load()` keeps the display criteria anyway.
+- **It pauses playback first.** The native output vends a paused frame in about 20 ms and a playing one only after ~300 ms. An item that already played to its end vends nothing to a new output, so the engine steps it 1 ms back, which makes it render its last frame again (about 17 ms on a Mac), and puts it back at its end after the read. The call returns once the picture is up; call `load()` after it.
+- **Dolby Vision through the compositor.** That still plays from a file in the session's cache, which the next `load()` deletes. The hold moves the file out first and deletes it when the picture comes down.
+- **Its own surface.** Pass a view of its own, not the one bound with `bindStillView(_:)`. An audio switch never lays its still on a view that holds the host's picture; it holds nothing there instead.
+- **It survives every `load()`,** whichever route the next item takes (native to software and back).
+- **When it comes down.**
+  - The host calls `releaseOutgoingPicture()`. This is the normal end.
+  - `stop()` runs, or a newer `holdOutgoingPicture(on:)` replaces it.
+  - The next load fails or its caller cancels it (`state` becomes `.error` or `.idle`).
+  - Safety nets: 8 s after the next item's first frame, or 60 s with no next first frame at all.
+- **Animating the view.** Each still sits in an autoresizing subview of the still view, so a change of the view's frame inside an animation carries the picture along on the same curve. Before, the still was a bare sublayer and would have run Core Animation's own 0.25 s default. Alpha fades the whole view, and the still keeps the view's `videoGravity`. The resize is pinned by a macOS test; the curve on tvOS is not measured yet.
+- **Returns false** in PiP, on external playback, without video, or when no frame could be read. Nothing is held then. Playback was paused if a read ran, so a host that does not load after all calls `play()`.
+- Not checked on a device yet: whether an HDR or Dolby Vision still in a small tile keeps the panel's mode on every TV.
 
 ### Picture in Picture on the software path
 
@@ -1954,6 +1985,7 @@ The engine can own the system Now-Playing card (lock screen, Control Center, the
 | `setExternalMetadata(_:)` | AVKit's on-screen info pane on the video path. Also the base identity of a card the engine publishes on the shared center. Safe before `load()`; replayed at host creation. |
 | `deactivatesAudioSessionOnStop` | Off by default. See [The audio session](#the-audio-session). |
 | `rendererAudioSessionActivationEnabled` | Default `true`. See [Host-managed renderer audio activation](#host-managed-renderer-audio-activation). |
+| `nativeAudioSessionActivationEnabled` | Default `false`. Turn on for a host on the bare player layer. See [Native activation for hosts on the bare player layer](#native-activation-for-hosts-on-the-bare-player-layer-ae1110). |
 | `logTag` | A short name for this instance (`tile2`), carried by the `[SharedOutput]` lines and by a `[AetherEngine:<tag>] state=` line per transition. On a host that runs several engines at once, set it on every engine before `load()` (the tag is captured when the engine joins). |
 
 A host that opts into everything needs no MediaPlayer code of its own:
@@ -2032,8 +2064,8 @@ The centers are process-wide. The engine writes `MPNowPlayingInfoCenter.default(
 
 - **Route-sharing policy differs by platform (#116).** tvOS declares `.longFormAudio`, iOS declares `.default`. `.longFormAudio` marks the process as a long-form audio client. That pins `AVPictureInPictureController.isPictureInPicturePossible` to false for any PiP controller a host builds around the engine's player layer, which is why iOS does not use it. Hosts do not need to re-declare the session for PiP.
 - **Why not at launch (#24).** Activating at launch pins the route to whatever the HDMI link reports at that moment. With tvOS Continuous Audio Connection off, the link idles at stereo. The route would be negotiated to 2 channels and stay there, downmixing non-Atmos multichannel for the whole session.
-- **Who activates.** On the native video path the host's `AVPlayerViewController` activates the session per playback. The renderer paths (software decode, audio-only) activate it themselves, off the main actor (AE#538). A host that mounts the bare `AVPlayerLayer` (`nativePlayerLayer`) instead of an `AVPlayerViewController` must make sure the session is active at playback.
-- **When a software video load activates (AE#1099).** After the play gate, the wait for the display mode switch, and before the first `play()` or the paused mount. The native path activates at `play()`, so both paths now negotiate the HDMI audio link with the panel already in its new mode. Before, the software path activated before it built its host, while the panel could still be switching. The silent Atmos stream that keeps a receiver in Atmos (`AtmosOutputActivator`) starts at the same point. A track reload has no play gate and still activates before its host is built. Audio-only loads activate before their host too.
+- **Who activates.** On the native video path the host's `AVPlayerViewController` activates the session per playback. The renderer paths (software decode, audio-only) activate it themselves, off the main actor (AE#538). A host that mounts the bare `AVPlayerLayer` (`nativePlayerLayer`, `AetherPlayerSurface`) instead of an `AVPlayerViewController` turns on `nativeAudioSessionActivationEnabled`, see below.
+- **When a software video load activates (AE#1099).** After the play gate, the wait for the display mode switch, and before the first `play()` or the paused mount. On the native path AVKit's player view activates at `play()` (or the engine at the same point, with `nativeAudioSessionActivationEnabled` on), so both paths now negotiate the HDMI audio link with the panel already in its new mode. Before, the software path activated before it built its host, while the panel could still be switching. The silent Atmos stream that keeps a receiver in Atmos (`AtmosOutputActivator`) starts at the same point. A track reload has no play gate and still activates before its host is built. Audio-only loads activate before their host too.
 - **Stereo from the receiver.** An AVR that caches its HDMI EDID wrongly after standby can still report 2 channels and force a downmix. Power-cycling the receiver fixes it.
 - **Atmos is unaffected** either way: E-AC-3 with JOC ships as MAT 2.0 over a 2-channel carrier.
 
@@ -2053,6 +2085,18 @@ The centers are process-wide. The engine writes `MPNowPlayingInfoCenter.default(
 - A session the host already put on `.playback` before that first load keeps its mode and policy.
 - Native AVKit activation is unchanged.
 - If the host also owns deactivation, leave `deactivatesAudioSessionOnStop` false (its default).
+
+### Native activation for hosts on the bare player layer (AE#1110)
+
+`nativeAudioSessionActivationEnabled` defaults to `false`. Set it to `true` before loading when the host shows the native path through the bare `AVPlayerLayer` (`AetherPlayerSurface`, `nativePlayerLayer`) instead of an `AVPlayerViewController`.
+
+- **Why.** AVKit's player view activates the session at `play()`. Without that view the host had to activate on its own, and it had no good moment. Before `load()` is before the display mode switch, so the HDMI audio link could be negotiated mid-switch (what AE#1099 removed on the software path). A sink on `videoRoute` turning native lands after `play()` whenever the play gate does not wait.
+- **When.** After the play gate and before the first `play()` or the paused mount, on a fresh native load and on an in-place native reload. That is the same point the software path uses.
+- **Remote HLS bypass.** `nativeRemoteHLS` has no play gate, so the engine activates right before its `play()` or paused mount, the latest point that route has.
+- **Resumes.** The end of an audio interruption, a second Play during one, and a remote Play from a pause reactivate too, since no AVKit view hands the session back.
+- **What.** `setActive(true)` only, through the engine's ordered session queue. The channel count stays AVPlayer's to negotiate.
+- **Hosts with `AVPlayerViewController`** leave it off. Their view already activates per playback.
+- **Hosts that own activation across several players** leave it off too, like `rendererAudioSessionActivationEnabled`.
 
 ## Stills and thumbnails
 
@@ -2154,6 +2198,8 @@ await frames.shutdown()                            // prompt teardown of the dec
 - The decode context opens lazily on first use; `prewarm()` opens it early.
 - Results land in a bounded LRU cache, thumbnails bucketed by second.
 - After 10 s idle the context closes and the cache drops. The next request reopens lazily.
+- An open that fails because of the source itself (no video stream, no codec parameters, no decoder for the video codec) is not retried. Every later request returns nil without reading the source again, for the life of the extractor. Other open failures, such as a refused or dropped connection, are retried on the next request.
+- Such a failure counts as final only when the stream analysis ran to its end or to its size or time limit. If a read error or a stop cut it short, the next request tries again.
 - `shutdown()` is the explicit, permanent teardown.
 
 | Method (`FrameMode`) | What it returns |
@@ -2583,7 +2629,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | Option | Default | What it does |
 | --- | --- | --- |
 | `audioOnly` | false | Lean audio pipeline, no video machinery. Also set automatically when the probe finds no video stream. |
-| `audioBridgeMode` | `.surroundCompat` | Bridge encoder for codecs that cannot be stream-copied into fMP4. `.surroundCompat` uses EAC3 for a source with more than two channels, and FLAC for two or fewer (no surround to carry). `.lossless` uses FLAC up to 7.1 throughout and needs a sink that accepts multichannel LPCM. |
+| `audioBridgeMode` | `.surroundCompat` | Bridge encoder for codecs that cannot be stream-copied into fMP4. `.surroundCompat` uses EAC3 for a source with more than two channels, and FLAC for two or fewer (no surround to carry). `.lossless` uses FLAC up to 7.1 throughout and needs a sink that accepts multichannel LPCM. A layout FLAC cannot label in fMP4 (7.1(wide) and others) goes out as 24-bit PCM instead ([formats › Layouts FLAC cannot label](formats.md#layouts-flac-cannot-label)). |
 | `objectAudioRendering` | `.off` | TrueHD Atmos and DTS:X with heights (#731), in a build with the object-audio traits. See [`objectAudioRendering`](#objectaudiorendering). |
 | `rendersDTSXObjectAudio` | true | `false` keeps DTS:X on the channel bridge while `objectAudioRendering` still renders TrueHD Atmos (#1060). See [`objectAudioRendering`](#objectaudiorendering). |
 | `confirmAtmos` | false | Confirms JOC per track in the background, and republishes `audioTracks` as tracks are confirmed. Never on the start path; skipped for live and forward-only readers. |
@@ -2602,6 +2648,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | `eagerNativeSubtitleReaders` | false | Populate those renditions at load instead of on first selection, for playlists AVKit auto-selects. Only meaningful with `prepareNativeSubtitles`. |
 | `nativeAudioTrackMenu` | false | List every audio track in the master so a stock `AVPlayerViewController` offers them all in its audio menu; a pick switches through `selectAudioTrack`. See [Formats › Every audio track in AVKit's audio menu](formats.md#every-audio-track-in-avkits-audio-menu). |
 | `nativeSubtitlePreferredLanguages` | empty | Which rendition is marked `DEFAULT=YES`. Resolved by the same BCP-47 matching as the overlay pick, so inline and PiP / AirPlay agree (#590). Read back as `nativeSubtitleDefaultOrdinal`. It does not turn on the overlay path, so subtitles cannot show twice next to the native render. |
+| `recognizesBitmapSubtitleText` | false | Read the text of bitmap cues (PGS / DVB / DVD) on the overlay path with Vision and republish each cue with `SubtitleImage.recognizedText`, for a host that draws picture subtitles in its own caption style (AE#1114). No extra reads. See [formats.md › Bitmap cues as text](formats.md#bitmap-cues-as-text-ae1114). |
 | `preserveASSMarkup` | false | Emit raw ASS event lines instead of extracted text; pair with `TrackInfo.assHeader`. ASS / SSA codecs only, embedded and sidecar alike, so a session mixing an ASS track with a SubRip one switches between them without a reload (AE#587). |
 | `teletextPage` | nil | Fix the DVB teletext caption page instead of letting libzvbi auto-detect. |
 | `serveIFramePlaylist` | false | Serve an I-frame rendition next to the master, so a stock `AVPlayerViewController` shows scrub thumbnails and scans on I-frames with no host code. See [`serveIFramePlaylist`](#serveiframeplaylist). |
@@ -2639,6 +2686,7 @@ Neither live startup option (`liveStartupGraceSeconds`, `liveStartupSingleSegmen
 | `preferredDecodePath` | `.automatic` | A `DecodePath`. `.software` serves this source through `SoftwarePlaybackHost`, whatever the routing concluded. One-way: there is no `.native`. See the note below and [Overriding the decode path](#overriding-the-decode-path). |
 | `escalatesToSoftwarePath` | `true` | Whether a failing native session may be rebuilt once on the software path (AE#561). `false` surfaces the failure as `.error` instead, for a host with its own fallback ladder (AE#629). Correctable. See the note below. |
 | `upscalesLowResolutionVideo` | false | Opt in to upscaling SDR video below 1080p to the display's native pixel size (#846). See [`upscalesLowResolutionVideo`](#upscaleslowresolutionvideo). |
+| `upscalesFullHDVideo` | false | Opt in to upscaling SDR 1080p video to the display with Lanczos-3. See [`upscalesFullHDVideo`](#upscalesfullhdvideo). |
 | `upscaleScaler` | `.automatic` | The scaler that upscale stage runs. `.lineArt` is a 2x line-art network for animation that also takes 1080p and 10-bit SDR (AE#1039). See [`upscaleScaler`](#upscalescaler). |
 | `videoProcessing` | nil | A `VideoProcessingOptions`: tone map HDR10 titles brighter than the display to its peak (#957). nil is off. See [`videoProcessing`](#videoprocessing). |
 | `deinterlaceMode` | `.auto` | A `DeinterlaceMode` for the software path: the Metal / VideoToolbox graph with a CPU bwdif fallback, or `.software` to force the CPU path. |
@@ -3063,6 +3111,27 @@ The load logs one `[Upscale] taken: <source> -> <target> (<stages>)` / `[Upscale
 
 **Correcting it.** A tuning field, correctable through `reloadAtCurrentPosition(applying:)` on a URL source, which re-runs `load()` and decides the route again. On a custom `IOReader` source, turning it off is honoured in place (the session stays on the software path and delivers frames as decoded). Turning it on is refused with `SessionReloadRefusal.upscaleRouteNeedsFreshLoad`.
 
+#### `upscalesFullHDVideo`
+
+Opt in to upscaling SDR 1080p video to the display's native pixel size, with Lanczos-3 (`UpscaleScaler.lanczos`). It takes anything larger than 1280x720 on either axis and at most 1920x1080, so cropped rips (1916x1036, 1904x800) count as 1080p.
+
+**Why.** An Apple TV shows 1080p on a 4K display by scaling it bilinearly, on the native path and the software path alike (measured on an A15, tvOS 27.2, from 4K screenshots against the reference). Over 13 Netflix and SVT test scenes brought from 4K down to 1080p and back up, VMAF NEG reads 85.5 for that bilinear picture, 92.1 for MetalFX spatial scaling and 94.0 for Lanczos-3. [measurements.md › Lanczos for 1080p](measurements.md#lanczos-for-1080p) has the numbers.
+
+**How.** Two passes per plane, along the rows and then the columns, six taps each, straight on the luma and chroma planes (`LanczosPlaneScaler`). There is no RGB round trip, so the matrix and range do not matter, and 10-bit stays 10-bit. Samples are rounded to the plane's codes and clamped only to the code range, so the ringing Lanczos leaves at hard edges (about a tenth of the step) stays as it is.
+
+**What it costs.**
+
+- The software path. Like the low-resolution stage it moves the title onto `SoftwarePlaybackHost`, which for most 1080p titles means a route they would otherwise play natively. That path's rules apply: on tvOS E-AC-3 Atmos plays as a decoded bed, PiP goes through `softwarePiPSource`, no native subtitle renditions. This is why it is its own option: 1080p is most of a library.
+- About 8 ms of GPU time per frame for 1080p to 2160p on an A15 (Apple TV 4K, 3rd generation) in playback at 24 fps, where line art reads about 21 ms. About 3 ms on an M1.
+
+**Not taken** for the same sources as `upscalesLowResolutionVideo` (HDR, Dolby Vision, a display no larger than the source, a wireless AirPlay route, a demuxed-audio live stream), and for 720p or smaller (`[Upscale] not taken (source is 720p or smaller and upscalesLowResolutionVideo is off)`) or above 1920x1080. Lanczos only scales up: a plan that would shrink one axis (a non-square source on a smaller display) is not taken.
+
+**With both options on**, the source's size picks the scaler (`UpscaleSizePolicy`): a `.lineArt` title keeps line art up to 1080p, anything larger than 720p gets Lanczos (also a cropped 1080p the automatic scaler would otherwise take with MetalFX), and the rest gets `upscaleScaler`. A size change mid-stream (an adaptive ladder, a live channel moving between 720p and 1080i) picks again by the same rule, unless an overrun already moved the stage down a rung.
+
+**How it behaves.** The same stage as the low-resolution one, with the same budget, logs and switch-off. The load logs `[Upscale] taken: 1920x1080 -> 3840x2160 (Lanczos)`, and `UpscaleStatus.scaler` is `.lanczos` with `mlScale` nil. A Lanczos stage that overruns has nothing below it and switches off.
+
+**Correcting it.** A tuning field like `upscalesLowResolutionVideo`, with the same rule on a custom `IOReader` source: turning it on there is refused with `SessionReloadRefusal.upscaleRouteNeedsFreshLoad`, turning it off is honoured in place.
+
 #### `upscaleScaler`
 
 Which scaler the upscale stage runs while `upscalesLowResolutionVideo` is on (AE#1039). Ignored while that option is off.
@@ -3071,6 +3140,7 @@ Which scaler the upscale stage runs while `upscalesLowResolutionVideo` is on (AE
 | --- | --- | --- |
 | `.automatic` (default) | VideoToolbox super resolution, then MetalFX, as described above | SDR, 8-bit 4:2:0, below 1080p |
 | `.lineArt` | A 2x line-art network, then a bilinear resample to the display box where 2x does not land on it | SDR, 8 or 10-bit 4:2:0, up to 1920x1080 |
+| `.lanczos` | Lanczos-3 straight to the display box, on the Y'CbCr planes (see [`upscalesFullHDVideo`](#upscalesfullhdvideo)) | SDR, 8 or 10-bit 4:2:0, up to 1920x1080 |
 
 **What `.lineArt` is.** [Anime4K](https://github.com/bloc97/Anime4K)'s "mode A" in its small size (MIT licence), as native Metal compute kernels in half precision. The kernels are `LineArtShaderSource`, generated from the original GLSL by `Scripts/generate-line-art-shader.py` with the weights unchanged. The passes are Clamp_Highlights, Restore CNN (S), then Upscale CNN x2 (S).
 
@@ -3091,8 +3161,8 @@ Which scaler the upscale stage runs while `upscalesLowResolutionVideo` is on (AE
 - Output frames keep the decoder's pixel format: 10-bit stays 10-bit.
 - **Falling back.**
   - The first sustained overrun drops the restore pass and the clamp. This is logged as `[Upscale] degraded: line art over budget ..., dropping the restore pass` and republished with `degraded` true and `scaler` still `.lineArt`. A later stage this overrun covers starts without them.
-  - A second overrun is remembered for the process (`LineArtCostMemory`). Then a source below 1080p falls back to the automatic route for the rest of the session: VideoToolbox super resolution, with MetalFX where available. The new stage builds off the decode thread while frames pass through, and `$activeUpscale` is republished with `degraded` true and `scaler` `.automatic`.
-  - A 1080p source has nothing below line art, so it switches off.
+  - A second overrun is remembered for the process (`LineArtCostMemory`). Then an 8-bit source below 1080p falls back to the automatic route for the rest of the session: VideoToolbox super resolution, with MetalFX where available. The new stage builds off the decode thread while frames pass through, and `$activeUpscale` is republished with `degraded` true and `scaler` `.automatic`.
+  - A 1080p source, a 10-bit one, and one the device offers no VideoToolbox pass for fall back to `.lanczos` instead, which costs about a third of line art. A Lanczos stage that overruns as well switches off.
   - A later load that the remembered overrun covers (at least as large, at least as fast) starts on that fallback directly, logged as `[Upscale] line art overran on this device earlier, ...`.
 - `UpscaleStatus.scaler` is `.lineArt`, and `mlScale` is nil.
 
@@ -3164,10 +3234,11 @@ So correcting it through `reloadAtCurrentPosition(applying:)` does nothing. Call
 | `DolbyVisionEnhancementLayer` | `.fel` (the residual changes the picture; only the dual-layer route shows it) or `.mel` (the residual is empty; the base layer and RPU are the picture). Returned by `probeDolbyVisionEnhancementLayer`, and in `SourceProbe.dolbyVisionEnhancementLayer` by a probe asked for `.dolbyVisionEnhancementLayer`. |
 | `TrackInfo` | See [`TrackInfo`](#trackinfo). |
 | `MediaMetadata` | `title`, `artist`, `album`, `artworkData`, `hasDisplayMetadata`. There is no separate album-artist field: a container's album artist is a fallback the parser folds into `artist`. |
-| `SubtitleCue` | `id`, `startTime`, `endTime`, `body` (a `SubtitleCue.Body`: `.text`, `.richText`, `.image`), `placement`, plus `text` and `isForced` conveniences. |
+| `SubtitleCue` | `id`, `startTime`, `endTime`, `body` (a `SubtitleCue.Body`: `.text`, `.richText`, `.image`), `placement`, plus `text`, `isForced` and `recognizedText` conveniences. Equality compares `id`, the times and the recognized text. |
 | `SubtitleTextRun` | `text`, `color`, `isBold`, `isItalic`, `isUnderlined`, `isStruckThrough`, `fontName`, `fontSize`, `isStyled`. |
 | `SubtitleTextPlacement` | `alignment` (numpad), `position` (a [0, 1] anchor). |
-| `SubtitleImage` | `cgImage`, `position`, `canvasSize`, `isForced`. |
+| `SubtitleImage` | `cgImage`, `position`, `canvasSize`, `isForced`, `recognizedText` (nil unless `recognizesBitmapSubtitleText` is on and the picture was read). |
+| `SubtitleRecognizedText` | `lines` (each a `Line` with `text`, `confidence` 0 to 1, and a `boundingBox` normalized to the picture with a top-left origin), `language` (the pin used, nil when unpinned), `level` (`.accurate` or `.fast`), plus a `text` convenience joining the lines. See [formats.md › Bitmap cues as text](formats.md#bitmap-cues-as-text-ae1114). |
 | `ExternalSubtitleTrack` | `url`, `name`, `language`, `isForced`, `isHearingImpaired`, `isDefault`, `httpHeaders` (nil inherits `LoadOptions.httpHeaders` for a same-origin URL only, see [External subtitle request headers](#external-subtitle-request-headers)), `formatHint` for URLs whose path hides the format, and `sourceStreamIndex` for a container holding several subtitle streams. That index addresses the container at `url`, not the played media. |
 | `NativeSubtitleTrack` | `ordinal`, `language`, `displayName`, plus `sameLanguageRank(of:in:)` for telling same-language options apart (eng Full against eng SDH). |
 | `RecordingState` | `.idle`, `.recording(RecordingProgress)`, `.ended(RecordingEndReason)`, `.failed(RecordingFailure)`. What the session's live recording is doing. |
@@ -3179,8 +3250,8 @@ So correcting it through `reloadAtCurrentPosition(applying:)` does nothing. Call
 | `AudioShaping` | `maxChannels` (nil or 1...8, never upmixes), `dialogueGainDB` (0...`maxDialogueGainDB`, 12), `compressor`, `loudnessTargetLUFS` (nil or within `loudnessTargetRange`, -36...-12; raises by at most `maxLoudnessGainDB`, 18 dB), `lfeMixDB` (nil or within `lfeMixRange`, -20...+10; the LFE level in a fold that drops it), `clamped`, `isActive`, `summary` (the wording the engine's log uses). |
 | `AudioShaping.Compressor` | `thresholdDB` (clamped to -60...0 dBFS), `ratio` (1...20), `makeupGainDB` (0...24 dB), `attackMilliseconds` (0.1...200), `releaseMilliseconds` (10...2000), `kneeDB` (0...18); a non-finite value reads back as a neutral default. `clamped`, and the `night` preset (-30 dB, 4:1, +10 dB makeup, 5 ms attack, 250 ms release, 6 dB knee). |
 | `AudioShapingState` | `.off`, `.applied`, `.unavailable`; see `$audioShapingState`. |
-| `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when MetalFX alone scales), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (see note 3), `scaler` (the `UpscaleScaler` the stage runs). See `$activeUpscale`. |
-| `UpscaleScaler` | `.automatic` or `.lineArt`, the scaler `LoadOptions.upscaleScaler` selects. See [`upscaleScaler`](#upscalescaler). |
+| `UpscaleStatus` | `sourceSize` (the decoded size the stage receives), `mlScale` (the VideoToolbox super-resolution factor; nil when no VideoToolbox pass runs: MetalFX alone, line art or Lanczos), `targetSize` (the delivered size: the source's display aspect fitted into the display), `disabledReason` (set when the stage switched itself off mid-session), `degraded` (see note 3), `scaler` (the `UpscaleScaler` the stage runs). See `$activeUpscale`. |
+| `UpscaleScaler` | `.automatic`, `.lineArt` or `.lanczos`, the scaler `LoadOptions.upscaleScaler` selects (`.lanczos` is also what `upscalesFullHDVideo` runs). See [`upscaleScaler`](#upscalescaler). |
 | `VideoProcessingOptions` | `targetPeakNits`, the display's peak in nit. `LoadOptions.videoProcessing`; see [`videoProcessing`](#videoprocessing). |
 | `VideoProcessingStatus` | `stages` (`[VideoProcessingStage]`), `sourcePeakNits`, `sourcePeak` (a `ToneMapSourcePeak`), `targetPeakNits`, `disabledReason` (set when the processing switched itself off mid-session). See [Picture processing status](#picture-processing-status). |
 | `VideoProcessingStage` | `.toneMap`, the BT.2390 tone map. |

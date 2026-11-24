@@ -657,6 +657,19 @@ public struct LoadOptions: Sendable, Equatable {
     /// Ignored while `upscalesLowResolutionVideo` is off. A tuning field like it.
     public var upscaleScaler: UpscaleScaler = .automatic
 
+    /// Opt in to upscaling SDR 1080p sources (larger than 1280x720 on either axis, at most 1920x1080, so
+    /// cropped rips such as 1916x1036 count) to the display with `UpscaleScaler.lanczos`. An Apple TV
+    /// scales such a picture to a 4K display bilinearly on both playback paths (measured on an A15, tvOS
+    /// 27.2); Lanczos-3 keeps clearly more detail at about 8 ms of GPU per frame there. With
+    /// `upscalesLowResolutionVideo` also on it takes these sizes from the automatic scaler, which would
+    /// run MetalFX on a cropped 1080p source. Like the low-resolution stage it moves the session to
+    /// `SoftwarePlaybackHost`, with the same exceptions (HDR, Dolby Vision, a display no larger than the
+    /// source, a wireless AirPlay route, a demuxed-audio live stream). Separate from
+    /// `upscalesLowResolutionVideo` because 1080p is most of a library, and the software path has costs a
+    /// host should let its user weigh. A `.lineArt` title keeps line art at 1080p when that option is on.
+    /// Default false. A tuning field like `upscalesLowResolutionVideo`.
+    public var upscalesFullHDVideo: Bool = false
+
     /// Opt in to picture processing for HDR10 titles brighter than the display (#957). nil (the default)
     /// is off.
     ///
@@ -979,6 +992,9 @@ public struct LoadOptions: Sendable, Equatable {
 
     /// Declare a mov_text track in the init moov so text subtitles survive PiP / AirPlay / external display via AVMediaSelection. Bitmap codecs (PGS / DVB / DVD) excluded automatically. Default `false` (#55).
     public var prepareNativeSubtitles: Bool = false
+
+    /// Read the text of bitmap subtitle cues (PGS / DVB / DVD, embedded and sidecar) on the overlay path and publish it as `SubtitleImage.recognizedText`, so a host can draw picture subtitles in its own caption style (AE#1114). Runs on-device with Vision, one picture at a time on the engine's recognition thread, inside the window the overlay already decodes (no extra reads). Each cue is published first without text and republished once read; a host shows the picture until then. Covers the primary and the secondary channel, forced cues included. A tuning field: correctable through `reloadAtCurrentPosition(applying:)`. Default `false`.
+    public var recognizesBitmapSubtitleText: Bool = false
 
     /// Start the native WebVTT subtitle readers eagerly at load (instead of lazily on `setNativeSubtitleSelected`), so the `/subs_N_M.vtt` segments are already populated when AVKit fetches them under a host-independent selection (e.g. an `EXT-X-MEDIA ... DEFAULT=YES` rendition that AVKit auto-selects). Equivalent to a fully-populated static VOD subtitle file. Only meaningful with `prepareNativeSubtitles`. Default `false` (Sodalite#32 probe).
     public var eagerNativeSubtitleReaders: Bool = false
@@ -1357,6 +1373,7 @@ public struct LoadOptions: Sendable, Equatable {
         foldsDolbyVisionFEL: Bool = true,
         upscalesLowResolutionVideo: Bool = false,
         upscaleScaler: UpscaleScaler = .automatic,
+        upscalesFullHDVideo: Bool = false,
         videoProcessing: VideoProcessingOptions? = nil,
         matchContentEnabled: Bool = true,
         panelIsInHDRMode: Bool = false,
@@ -1382,6 +1399,7 @@ public struct LoadOptions: Sendable, Equatable {
         nativeRemoteHLSIngestFallback: Bool = true,
         preserveASSMarkup: Bool = false,
         prepareNativeSubtitles: Bool = false,
+        recognizesBitmapSubtitleText: Bool = false,
         eagerNativeSubtitleReaders: Bool = false,
         nativeAudioTrackMenu: Bool = false,
         serveIFramePlaylist: Bool = false,
@@ -1435,6 +1453,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.foldsDolbyVisionFEL = foldsDolbyVisionFEL
         self.upscalesLowResolutionVideo = upscalesLowResolutionVideo
         self.upscaleScaler = upscaleScaler
+        self.upscalesFullHDVideo = upscalesFullHDVideo
         self.videoProcessing = videoProcessing
         self.matchContentEnabled = matchContentEnabled
         self.panelIsInHDRMode = panelIsInHDRMode
@@ -1460,6 +1479,7 @@ public struct LoadOptions: Sendable, Equatable {
         self.nativeRemoteHLSIngestFallback = nativeRemoteHLSIngestFallback
         self.preserveASSMarkup = preserveASSMarkup
         self.prepareNativeSubtitles = prepareNativeSubtitles
+        self.recognizesBitmapSubtitleText = recognizesBitmapSubtitleText
         self.eagerNativeSubtitleReaders = eagerNativeSubtitleReaders
         self.nativeAudioTrackMenu = nativeAudioTrackMenu
         self.serveIFramePlaylist = serveIFramePlaylist
@@ -1986,6 +2006,13 @@ public struct SubtitleCue: Identifiable, Sendable {
         return image.cgImage.bytesPerRow * image.cgImage.height
     }
 
+    /// AE#1114: the recognized text of a bitmap cue, nil for text cues and for a picture not read.
+    /// Part of the equality above, so a cue republished with its text reads as changed.
+    public var recognizedText: SubtitleRecognizedText? {
+        guard case .image(let image) = body else { return nil }
+        return image.recognizedText
+    }
+
     /// Plain text for text and rich-text cues (rich runs concatenated); nil for bitmap cues.
     public var text: String? {
         switch body {
@@ -2029,6 +2056,7 @@ extension SubtitleCue: Equatable {
         lhs.id == rhs.id
             && lhs.startTime == rhs.startTime
             && lhs.endTime == rhs.endTime
+            && lhs.recognizedText == rhs.recognizedText
     }
 }
 
@@ -2054,12 +2082,78 @@ public struct SubtitleImage: @unchecked Sendable {
     /// AV_SUBTITLE_FLAG_FORCED from the decoded rect (#146): the disc authored this object as a
     /// forced caption (sign / foreign-dialogue overlay shown even with subtitles off).
     public let isForced: Bool
+    /// AE#1114: what on-device text recognition read in this picture, when the host asked for it
+    /// with `LoadOptions.recognizesBitmapSubtitleText`. nil means not read (yet): the cue is
+    /// republished with the text once recognition finishes, usually well before it is due. A value
+    /// with no lines means the picture was read and held nothing readable, so keep the image.
+    public let recognizedText: SubtitleRecognizedText?
 
-    public init(cgImage: CGImage, position: CGRect, canvasSize: CGSize = .zero, isForced: Bool = false) {
+    public init(cgImage: CGImage, position: CGRect, canvasSize: CGSize = .zero, isForced: Bool = false,
+                recognizedText: SubtitleRecognizedText? = nil) {
         self.cgImage = cgImage
         self.position = position
         self.canvasSize = canvasSize
         self.isForced = isForced
+        self.recognizedText = recognizedText
+    }
+
+    /// #146: within one start, the object a re-decode produces again has the same position and pixel
+    /// size (the alpha-bounding-box crop is deterministic), and sibling objects of one display set
+    /// differ in both. The store's replace and AE#1114's write-back must agree on this, so it is here.
+    func isSameComposition(as other: SubtitleImage) -> Bool {
+        position == other.position
+            && cgImage.width == other.cgImage.width
+            && cgImage.height == other.cgImage.height
+    }
+
+    func with(recognizedText: SubtitleRecognizedText?) -> SubtitleImage {
+        SubtitleImage(cgImage: cgImage, position: position, canvasSize: canvasSize,
+                      isForced: isForced, recognizedText: recognizedText)
+    }
+}
+
+/// AE#1114: the text Vision read in a bitmap subtitle (`SubtitleImage.recognizedText`), for a host
+/// that draws picture subtitles in its own caption style.
+public struct SubtitleRecognizedText: Sendable, Equatable {
+    public struct Line: Sendable, Equatable {
+        public let text: String
+        /// Vision's confidence for this line, 0...1. Coarse in practice: the recognizer tends to answer
+        /// a few fixed values (0.3, 0.5, 1.0 are common), so treat it as a grade, not a probability.
+        public let confidence: Float
+        /// Where the line sits in the cue's picture, normalized to it with a top-left origin, so it
+        /// composes with `SubtitleImage.position` the same way the picture does.
+        public let boundingBox: CGRect
+
+        public init(text: String, confidence: Float, boundingBox: CGRect) {
+            self.text = text
+            self.confidence = confidence
+            self.boundingBox = boundingBox
+        }
+    }
+
+    public enum Level: Sendable, Equatable {
+        /// Vision's accurate model, the default.
+        case accurate
+        /// Vision's fast model. Used for the rest of the process once the accurate one failed (#552).
+        case fast
+    }
+
+    /// Top line first. Blank lines are dropped; empty when nothing readable was found.
+    public let lines: [Line]
+    /// The recognition language the engine pinned (BCP-47 primary code such as "de"), nil when it
+    /// ran unpinned: the track has no language, or the model that ran does not support it.
+    public let language: String?
+    public let level: Level
+
+    public init(lines: [Line], language: String?, level: Level) {
+        self.lines = lines
+        self.language = language
+        self.level = level
+    }
+
+    /// The lines joined top to bottom, nil when there are none.
+    public var text: String? {
+        lines.isEmpty ? nil : lines.map(\.text).joined(separator: "\n")
     }
 }
 
@@ -2122,6 +2216,11 @@ public enum UpscaleScaler: Sendable, Hashable {
     /// A 2x line-art network for animation (Anime4K Upscale CNN S, half precision), then a bilinear
     /// resample to the target where 2x does not land on it. SDR 8 or 10-bit 4:2:0 up to 1920x1080.
     case lineArt
+    /// Lanczos-3 on the Y'CbCr planes, no network and no RGB round trip: a separable pass along the rows,
+    /// then along the columns, straight to the target. SDR 8 or 10-bit 4:2:0 up to 1920x1080. What
+    /// `LoadOptions.upscalesFullHDVideo` runs, and what a 1080p line-art stage falls back to when it
+    /// overruns.
+    case lanczos
 }
 
 /// What the low-resolution upscale stage is doing for the current session (#846), published as
@@ -2129,7 +2228,8 @@ public enum UpscaleScaler: Sendable, Hashable {
 public struct UpscaleStatus: Sendable, Equatable {
     /// The decoded (coded) size the stage receives.
     public let sourceSize: CGSize
-    /// The VideoToolbox super-resolution factor, nil when MetalFX alone scales.
+    /// The VideoToolbox super-resolution factor, nil when no VideoToolbox pass runs (MetalFX alone, line
+    /// art, Lanczos; `scaler` says which).
     public let mlScale: Float?
     /// The size the stage delivers: the source's display aspect fitted into the display.
     public let targetSize: CGSize

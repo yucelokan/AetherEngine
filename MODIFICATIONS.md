@@ -1,11 +1,11 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-23. Integration base: upstream 7.73.0
-(`bbcf3b8359252b361258dc79817c4f81683df7b8`). FFmpegBuild 3.19.0 (FFmpeg n8.1.3 unchanged).
+Updated: 2026-11-25. Integration base: upstream 7.75.0
+(`1257b90d759f3bc3f0026f167b19db9eb6d5e201`, tag `7.75.0`). FFmpegBuild 3.19.1 (dav1d 1.5.5, FFmpeg n8.1.3 unchanged).
 
 ## Current differences
 
-One change, not offered upstream yet. Otherwise the source matches 7.73.0 exactly, and this file and
+One change, not offered upstream yet. Otherwise the source matches 7.75.0 exactly, and this file and
 `COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as pull
 requests.
 
@@ -19,7 +19,7 @@ requests.
   `Tests/AetherEngineTests/Issue255BodyReserveTests.swift`, `docs/api.md`, `docs/source-map.md`,
   `CHANGELOG.md`.
 
-Not taken in this integration: the one-line change to `.github/workflows/used-by-add.yml` (an
+Not taken since 7.73.0: the one-line change to `.github/workflows/used-by-add.yml` (an
 upstream-only automation). The fork's push token has no `workflow` scope, so GitHub refuses a push that
 changes a workflow file; the fork keeps its copy of that file. Take it with the next integration once the
 token allows it.

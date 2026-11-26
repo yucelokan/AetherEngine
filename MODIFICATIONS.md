@@ -1,11 +1,11 @@
 # Fork provenance and modification history
 
-Updated: 2026-11-25. Integration base: upstream 7.75.0
-(`1257b90d759f3bc3f0026f167b19db9eb6d5e201`, tag `7.75.0`). FFmpegBuild 3.19.1 (dav1d 1.5.5, FFmpeg n8.1.3 unchanged).
+Updated: 2026-11-26. Integration base: upstream 7.76.0
+(`506d3fc1467e6653320b1071b194c8c19420866f`, tag `7.76.0`). FFmpegBuild 3.19.2 (FFmpeg n8.1.3 and dav1d 1.5.5 unchanged).
 
 ## Current differences
 
-One change, not offered upstream yet. Otherwise the source matches 7.75.0 exactly, and this file and
+One change, not offered upstream yet. Otherwise the source matches 7.76.0 exactly, and this file and
 `COPYING.GPL3` are the only other additions. Fixes made here are generic and go upstream as pull
 requests.
 
